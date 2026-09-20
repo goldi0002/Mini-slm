@@ -1,0 +1,6 @@
+{
+  "name": "Local SLM TypeScript Studio",
+  "description": "A conversational Small Language Model engine built in TypeScript with in-browser pre-trained models, memory-efficient fine-tuning on chat datasets, and real-time dialogue.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
