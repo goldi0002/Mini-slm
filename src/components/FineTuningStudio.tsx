@@ -130,7 +130,9 @@ export const FineTuningStudio: React.FC<FineTuningStudioProps> = ({
 
         if (!isTrainingRef.current) break;
 
-        const formattedText = `${SPECIAL_TOKENS.USER} ${turn.user} ${SPECIAL_TOKENS.NEWLINE}${SPECIAL_TOKENS.ASSISTANT} ${turn.assistant} ${SPECIAL_TOKENS.EOS}`;
+        // Note: EOS is appended by the tokenizer (addEos) — do not also embed
+        // the '<eos>' string here or sequences would end with a double EOS.
+        const formattedText = `${SPECIAL_TOKENS.USER} ${turn.user} ${SPECIAL_TOKENS.NEWLINE}${SPECIAL_TOKENS.ASSISTANT} ${turn.assistant}`;
         const tokens = model.tokenizer.encode(formattedText, true, true);
 
         // Learning rate decay over epochs

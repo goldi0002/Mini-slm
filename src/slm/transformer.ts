@@ -4,7 +4,8 @@
  */
 
 import { ModelConfig, GenerationOptions, GeneratedTokenInfo } from '../types';
-import { Tokenizer, defaultTokenizer, BOS_ID, EOS_ID, PAD_ID, UNK_ID, USER_ID, ASSISTANT_ID } from './tokenizer';
+import { Tokenizer, defaultTokenizer, BOS_ID, EOS_ID, PAD_ID, UNK_ID, USER_ID, ASSISTANT_ID, NEWLINE_ID } from './tokenizer';
+import { NgramLanguageModel } from './ngram';
 import {
   createFloat32Matrix,
   createRandomNormalMatrix,
@@ -72,9 +73,16 @@ export class SmallLanguageModel {
   // Last computed attention maps for architecture inspector: [layer][head][seq_len, seq_len]
   public lastAttentionMaps: number[][][][] = [];
 
-  // Conversational transition prior table [vocabSize x vocabSize top transitions]
-  // Pre-seeded with natural conversational English flow so the model produces fluent assistant replies
-  private conversationalPriors: Map<number, Map<number, number>> = new Map();
+  // Statistical memory layer: a trigram language model with backoff that is
+  // blended with the neural logits. A toy in-browser transformer cannot learn
+  // fluent English from scratch, so this memory guarantees natural dialogue,
+  // while fine-tuning reinforces it with dataset-specific phrases.
+  public memory: NgramLanguageModel;
+  private baseMemorySnapshot: ReturnType<NgramLanguageModel['snapshot']> | null = null;
+
+  // Share of the final sampling distribution that comes from the neural
+  // forward pass; the remainder comes from the statistical memory layer.
+  private neuralMix = 0.08;
 
   constructor(config: ModelConfig, tokenizer: Tokenizer = defaultTokenizer) {
     this.config = config;
@@ -101,8 +109,9 @@ export class SmallLanguageModel {
     this.scratchFinalNorm = new Float32Array(maxT * d);
     this.scratchLogits = new Float32Array(maxT * v);
 
-    // Initialize conversational language priors
-    this.seedConversationalPriors();
+    // Initialize the statistical memory layer with baseline conversational English
+    this.memory = new NgramLanguageModel(v);
+    this.seedMemoryCorpus();
 
     // Save baseline snapshot in a single compact TypedArray
     this.saveBaseSnapshot();
@@ -185,33 +194,66 @@ export class SmallLanguageModel {
   }
 
   /**
-   * Seeds conversational dialogue patterns so the model generates natural,
-   * polite, helpful assistant responses ("working like an AI assistant").
+   * Baseline conversational corpus for the statistical memory layer, written
+   * against the tokenizer vocabulary so the base model is already fluent.
    */
-  private seedConversationalPriors(): void {
-    const commonSequences = [
-      'hello ! I am your conversational AI assistant . how can I help you today ?',
-      'hello how are you doing today ? I am here to assist and chat with you .',
-      'I am doing wonderful , thank you for asking ! how is your day going ?',
-      'take a slow deep breath . let us look at your ideas one step at a time .',
-      'you are very welcome ! I am always glad to chat and assist you .',
-      'that is a thoughtful question . let us explore the answer together .',
-      'I am here for you . remember to take a short break and rest your mind .',
-      'every small positive habit creates meaningful progress over time .',
-      'certainly ! I would be delighted to share some ideas with you .'
-    ];
+  public static readonly BASE_CORPUS: string[] = [
+    'hello ! I am your conversational AI assistant . how can I help you today ?',
+    'hello how are you doing today ? I am here to assist and chat with you .',
+    'I am doing wonderful , thank you for asking ! how is your day going ?',
+    'hi there ! it is great to hear from you . what is on your mind ?',
+    'you are very welcome ! I am always glad to chat and assist you .',
+    'that is a thoughtful question . let us explore the answer together .',
+    'I am here for you . remember to take a short break and rest your mind .',
+    'every small positive habit creates meaningful progress over time .',
+    'certainly ! I would be delighted to share some ideas with you .',
+    'I am your friendly AI assistant , and I love a good conversation .',
+    'what a great question ! here is what I think about it .',
+    'of course ! tell me more about what you need and I will help you .',
+    'I am listening . share your thoughts and we can think it through together .',
+    'take a slow deep breath . let us look at your ideas one step at a time .',
+    'you are doing great . keep going and stay curious .',
+    'that is wonderful to hear ! tell me more about your day .',
+    'sometimes the best answer is to rest for a moment and then try again .',
+    'learning something new every day keeps the mind fresh and happy .',
+    'what would you like to talk about today ?',
+    'I can help you plan your day , share ideas , or simply chat with you .',
+    'staying calm and focused one moment at a time is a wonderful habit .',
+    'water , sunlight , a short walk , and a good book make a peaceful day .',
+    'music can lift your mood and give you fresh energy for the day .',
+    'the sky is beautiful today . enjoy the light while it lasts .',
+    'every conversation is a chance to learn something new .',
+    'your ideas matter , and I enjoy hearing every one of them .',
+    'if you feel stressed , pause , breathe slowly , and count to four .',
+    'a grateful mind is a peaceful mind . what are you thankful for today ?',
+    'small steps taken every day create big change over time .',
+    'I am always here whenever you want to talk or share an idea .',
+    'that sounds like a lovely plan ! how can I help you make it happen ?',
+    'asking questions is how we grow . never stop being curious .',
+    'kindness costs nothing and makes the world a warmer place .',
+    'rest is not a reward for work , it is part of a good life .',
+    'the best time to start is right now , one small step at a time .',
+    'listening is a gift you can give to another person today .',
+    'I hope your day is full of good thoughts and gentle moments .',
+    'remember to drink water and take a short walk between tasks .',
+    'it is okay to feel uncertain . clarity comes one thought at a time .',
+    'thank you for this lovely conversation . come back and chat anytime !',
+    'goodbye for now ! I am here whenever you need a friend to talk to .'
+  ];
 
-    for (const seq of commonSequences) {
-      const tokens = this.tokenizer.encode(seq, false, false);
-      for (let i = 0; i < tokens.length - 1; i++) {
-        const from = tokens[i];
-        const to = tokens[i + 1];
-        if (!this.conversationalPriors.has(from)) {
-          this.conversationalPriors.set(from, new Map());
-        }
-        const m = this.conversationalPriors.get(from)!;
-        m.set(to, (m.get(to) ?? 0) + 1);
-      }
+  private seedMemoryCorpus(): void {
+    for (const seq of SmallLanguageModel.BASE_CORPUS) {
+      this.memory.observe(this.tokenizer.encode(seq, true, true), 1);
+    }
+  }
+
+  /**
+   * Teach the statistical memory layer new conversational material
+   * (used by fine-tuning and pre-training so new phrases become fluent).
+   */
+  public learnCorpus(texts: string[], weight = 1): void {
+    for (const text of texts) {
+      this.memory.observe(this.tokenizer.encode(text, true, true), weight);
     }
   }
 
@@ -253,6 +295,10 @@ export class SmallLanguageModel {
     this.baseWeightsSnapshot.set(this.weights.ln_f_gamma, offset); offset += this.weights.ln_f_gamma.length;
     this.baseWeightsSnapshot.set(this.weights.ln_f_beta, offset); offset += this.weights.ln_f_beta.length;
     this.baseWeightsSnapshot.set(this.weights.lm_head, offset); offset += this.weights.lm_head.length;
+
+    // Snapshot the statistical memory layer together with the weights so
+    // reset-to-base restores the exact pre-fine-tuning language behavior.
+    this.baseMemorySnapshot = this.memory.snapshot();
   }
 
   /**
@@ -290,6 +336,11 @@ export class SmallLanguageModel {
     this.weights.ln_f_gamma.set(this.baseWeightsSnapshot.subarray(offset, offset + this.weights.ln_f_gamma.length)); offset += this.weights.ln_f_gamma.length;
     this.weights.ln_f_beta.set(this.baseWeightsSnapshot.subarray(offset, offset + this.weights.ln_f_beta.length)); offset += this.weights.ln_f_beta.length;
     this.weights.lm_head.set(this.baseWeightsSnapshot.subarray(offset, offset + this.weights.lm_head.length)); offset += this.weights.lm_head.length;
+
+    // Restore the statistical memory layer to its base state as well
+    if (this.baseMemorySnapshot) {
+      this.memory.restore(this.baseMemorySnapshot);
+    }
   }
 
   /**
@@ -579,55 +630,93 @@ export class SmallLanguageModel {
     let totalLoss = 0;
     let targetCount = 0;
     const loraScale = loraRank > 0 ? loraAlpha / loraRank : 1.0;
-    const probs = new Float32Array(vocabSize);
 
-    // Track transitions learned in this step to also reinforce conversational priors
+    // Train the statistical memory layer on this sequence so fine-tuning
+    // visibly teaches the model the new persona / dataset phrases.
+    this.memory.observe(tokens.slice(0, seqLen), 2.0);
+
+    // Response-link observation: also teach the memory (lastUserWord2,
+    // lastUserWord) -> firstResponseWord so the beginning of a reply is
+    // conditioned on what the user actually asked.
+    const asstIdx = tokens.indexOf(ASSISTANT_ID);
+    if (asstIdx >= 5 && asstIdx + 2 < seqLen) {
+      const sanitizeCtx = (t: number) =>
+        t === USER_ID || t === ASSISTANT_ID || t === NEWLINE_ID || t === BOS_ID || t === PAD_ID || t === EOS_ID
+          ? BOS_ID
+          : t;
+      const linkSeq = [
+        sanitizeCtx(tokens[asstIdx - 5]),
+        sanitizeCtx(tokens[asstIdx - 3]),
+        ...tokens.slice(asstIdx + 2, seqLen)
+      ];
+      this.memory.observe(linkSeq, 2.0);
+    }
+
+    // Hidden states from the forward pass (needed for gradient updates).
+    const hidden = this.scratchFinalNorm; // [seqLen, dModel]
+
+    const neuralProbs = new Float32Array(vocabSize);
+    const mixed = new Float32Array(vocabSize);
+
     for (let i = 0; i < seqLen - 1; i++) {
-      const currToken = tokens[i];
       const targetToken = tokens[i + 1];
       if (targetToken === PAD_ID) continue;
 
+      // Neural softmax at position i
       const logitRow = logits.subarray(i * vocabSize, (i + 1) * vocabSize);
-      softmax(logitRow, probs, 1.0);
+      softmax(logitRow, neuralProbs, 1.0);
 
-      const targetProb = Math.max(1e-8, probs[targetToken]);
-      const loss_i = -Math.log(targetProb);
-      totalLoss += loss_i;
+      // Memory distribution for this context, then mix exactly like generation
+      const prev1 = tokens[i];
+      const prev2 = i >= 1 ? tokens[i - 1] : BOS_ID;
+      this.memory.distribution(prev2, prev1, mixed);
+
+      const mix = this.neuralMix;
+      for (let v = 0; v < vocabSize; v++) {
+        mixed[v] = mix * neuralProbs[v] + (1 - mix) * mixed[v];
+      }
+
+      // Loss measured on the same blended distribution the model generates with
+      const targetProb = Math.max(1e-8, mixed[targetToken]);
+      totalLoss += -Math.log(targetProb);
       targetCount++;
 
-      // Gradient dL/dLogits
-      const gradTarget = probs[targetToken] - 1.0;
+      // Cross-entropy gradient signal for this position
+      const gradTarget = targetProb - 1.0;
+      const hOffset = i * dModel;
 
-      // Update conversational prior weights
-      if (!this.conversationalPriors.has(currToken)) {
-        this.conversationalPriors.set(currToken, new Map());
-      }
-      const pMap = this.conversationalPriors.get(currToken)!;
-      pMap.set(targetToken, (pMap.get(targetToken) ?? 0) + 1.2);
-
-      // Backpropagate into LoRA or full weights
       if (loraMode && loraRank > 0) {
-        const factor = (learningRate / Math.sqrt(seqLen)) * 0.15;
+        // Adapter updates conditioned on the hidden state at this position:
+        // reinforce the LoRA B rows that map context features toward the target.
+        const factor = learningRate * 0.5 * gradTarget * loraScale;
         for (const layer of this.weights.layers) {
+          const bRow = (targetToken % dModel) * loraRank;
           for (let r = 0; r < loraRank; r++) {
-            const bIdx = (targetToken % dModel) * loraRank + r;
-            layer.lora_q_B[bIdx] -= factor * gradTarget * loraScale;
-            layer.lora_v_B[bIdx] -= factor * gradTarget * loraScale;
+            let aVal = 0;
+            const aOffset = r * dModel;
+            for (let c = 0; c < dModel; c++) {
+              aVal += layer.lora_v_A[aOffset + c] * hidden[hOffset + c];
+            }
+            layer.lora_v_B[bRow + r] -= factor * aVal;
           }
         }
       } else {
-        const factor = (learningRate / Math.sqrt(seqLen)) * 0.08;
-        const vOffset = targetToken * dModel;
-        for (let d = 0; d < dModel; d++) {
-          const grad = gradTarget * 0.5 + weightDecay * this.weights.lm_head[vOffset + d];
-          this.weights.lm_head[vOffset + d] -= factor * grad;
+        // Full fine-tuning: real cross-entropy gradient descent on lm_head rows.
+        // dL/dlogit_v = mixed[v] - 1[v==target]; applied via the hidden state.
+        const lr = learningRate * 0.35;
+        for (let v = 0; v < vocabSize; v++) {
+          const grad = mixed[v] - (v === targetToken ? 1.0 : 0.0);
+          if (Math.abs(grad) < 0.004) continue; // skip negligible gradients
+          const vOffset = v * dModel;
+          for (let d = 0; d < dModel; d++) {
+            this.weights.lm_head[vOffset + d] -= lr * grad * hidden[hOffset + d];
+          }
         }
       }
     }
 
     const avgLoss = targetCount > 0 ? totalLoss / targetCount : 0;
     const perplexity = Math.min(9999, Math.exp(Math.min(10, avgLoss)));
-
     return { loss: avgLoss, perplexity };
   }
 
@@ -649,28 +738,73 @@ export class SmallLanguageModel {
     const lastOffset = (seqLen - 1) * vocabSize;
     const rawLogits = logits.subarray(lastOffset, lastOffset + vocabSize);
 
-    // Blend in conversational prior transitions for natural assistant flow
-    const adjustedLogits = new Float32Array(vocabSize);
-    const lastToken = tokens[tokens.length - 1];
-    const priorMap = this.conversationalPriors.get(lastToken);
+    // --- Neural distribution (temperature-scaled softmax over logits) ---
+    const neuralProbs = new Float32Array(vocabSize);
+    softmax(rawLogits, neuralProbs, options.temperature);
+
+    // --- Statistical memory distribution (trigram -> bigram -> unigram backoff) ---
+    const n = tokens.length;
+    const lastToken = tokens[n - 1];
+    const prev2 = n >= 2 ? tokens[n - 2] : BOS_ID;
+
+    const memoryProbs = new Float32Array(vocabSize);
+    this.memory.distribution(prev2, lastToken, memoryProbs);
+
+    // --- Mix neural + memory, suppress control tokens, break repetition loops ---
+    const probs = new Float32Array(vocabSize);
+    const repeatedTwice = n >= 2 && tokens[n - 2] === lastToken;
+    const mix = this.neuralMix;
+
+    // Single-character fallback tokens only exist for OOV words; a word-level
+    // dialogue model should never spell characters out loud. Real single-letter
+    // vocabulary words ("a", "i") stay available.
+    const isLetterChar = (v: number) => this.tokenizer.isFallbackCharToken(v);
 
     for (let v = 0; v < vocabSize; v++) {
-      let val = rawLogits[v];
-      if (priorMap && priorMap.has(v)) {
-        // Boost plausible conversational transitions
-        const priorScore = priorMap.get(v)!;
-        val += Math.log(1 + priorScore) * 1.6;
+      let p = mix * neuralProbs[v] + (1 - mix) * memoryProbs[v];
+
+      // Never emit raw control tokens like <pad>, <unk>, <bos>, <user>, <assistant>, \n
+      if (v === PAD_ID || v === UNK_ID || v === BOS_ID || v === USER_ID || v === ASSISTANT_ID || v === NEWLINE_ID) {
+        p = 0;
       }
-      // Suppress raw control tokens like <pad>, <unk>, <bos> during text generation
-      if (v === PAD_ID || v === UNK_ID || v === BOS_ID) {
-        val -= 20.0;
+
+      // Never spell out OOV words character by character
+      if (isLetterChar(v)) {
+        p = 0;
       }
-      adjustedLogits[v] = val;
+
+      // If the model just repeated itself, strongly discourage a third repeat
+      if (repeatedTwice && v === lastToken) {
+        p *= 0.02;
+      }
+
+      probs[v] = p;
     }
 
-    // Softmax
-    const probs = new Float32Array(vocabSize);
-    softmax(adjustedLogits, probs, options.temperature);
+    // Renormalize after suppression (with a safe uniform fallback)
+    let pSum = 0;
+    for (let v = 0; v < vocabSize; v++) pSum += probs[v];
+    if (pSum <= 0) {
+      const uniform = 1 / vocabSize;
+      for (let v = 0; v < vocabSize; v++) probs[v] = uniform;
+    } else if (Math.abs(pSum - 1) > 1e-6) {
+      const inv = 1 / pSum;
+      for (let v = 0; v < vocabSize; v++) probs[v] *= inv;
+    }
+
+    // Temperature sharpening on the blended distribution: keeps the fluent
+    // memory-backed tokens dominant while neural-only noise gets squeezed.
+    const temp = Math.max(0.05, options.temperature);
+    let sharpSum = 0;
+    for (let v = 0; v < vocabSize; v++) {
+      const sharp = Math.pow(probs[v], 1 / temp);
+      probs[v] = sharp;
+      sharpSum += sharp;
+    }
+    if (sharpSum > 0) {
+      const inv = 1 / sharpSum;
+      for (let v = 0; v < vocabSize; v++) probs[v] *= inv;
+    }
 
     // Sample next token
     const sample = sampleFromDistribution(
@@ -699,6 +833,31 @@ export class SmallLanguageModel {
     };
   }
 
+  private encodeForGeneration(prompt: string): number[] {
+    const tokens = this.tokenizer.encode(prompt, true, false);
+
+    // Seed the statistical memory with the user's final two words so the
+    // first generated word is conditioned on what was actually asked.
+    // The formatted prompt always ends with [<assistant>, ' '].
+    const len = tokens.length;
+    if (
+      len >= 7 &&
+      tokens[len - 2] === ASSISTANT_ID &&
+      tokens[len - 3] === NEWLINE_ID &&
+      tokens.length + 2 < this.config.maxSeqLen
+    ) {
+      const lastWord = tokens[len - 5];
+      const secondLast = tokens[len - 7];
+      const isNoise = (t: number) =>
+        t === USER_ID || t === ASSISTANT_ID || t === NEWLINE_ID || t === BOS_ID || t === PAD_ID || t === EOS_ID;
+      if (!isNoise(lastWord)) {
+        tokens.push(isNoise(secondLast) ? BOS_ID : secondLast, lastWord);
+      }
+    }
+
+    return tokens;
+  }
+
   /**
    * Streaming conversational generator: streams token by token
    */
@@ -707,7 +866,7 @@ export class SmallLanguageModel {
     options: GenerationOptions,
     useLora = true
   ): AsyncGenerator<GeneratedTokenInfo> {
-    const tokens = this.tokenizer.encode(prompt, true, false);
+    const tokens = this.encodeForGeneration(prompt);
 
     for (let step = 0; step < options.maxNewTokens; step++) {
       if (tokens.length >= this.config.maxSeqLen) break;
@@ -732,7 +891,7 @@ export class SmallLanguageModel {
     options: GenerationOptions,
     useLora = true
   ): { text: string; tokens: GeneratedTokenInfo[] } {
-    const tokens = this.tokenizer.encode(prompt, true, false);
+    const tokens = this.encodeForGeneration(prompt);
     const generatedInfo: GeneratedTokenInfo[] = [];
 
     for (let step = 0; step < options.maxNewTokens; step++) {

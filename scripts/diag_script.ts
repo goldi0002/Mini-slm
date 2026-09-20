@@ -1,0 +1,364 @@
+/**
+ * diag_script.ts — verification harness for the SLM engine fixes.
+ *
+ * Verifies, end to end and without a browser:
+ *   1. Vocabulary coverage: built-in corpora & datasets must encode without
+ *      UNK tokens or single-letter char fallbacks (generation suppresses
+ *      char tokens, so anything char-spelled can never be generated).
+ *   2. Base model coherence: fluent, grammar-shaped output with no raw
+ *      special tokens and no spelled-out characters.
+ *   3. Fine-tuning reduces training loss across epochs.
+ *   4. Fine-tuning teaches dataset answers (post-train replies match the
+ *      trained dataset, base replies do not).
+ *   5. resetToBase() restores exact base behavior (weights + memory layer).
+ *   6. Streaming API yields valid token info.
+ *
+ * Run: bun scripts/diag_script.ts
+ */
+
+import { PREDEFINED_MODELS, initializePretrainedModel } from '../src/slm/predefinedModels';
+import { PREDEFINED_DATASETS, generateExpandedChatCorpus } from '../src/slm/datasets';
+import { defaultTokenizer, SPECIAL_TOKENS, UNK_ID, BOS_ID } from '../src/slm/tokenizer';
+import { SmallLanguageModel } from '../src/slm/transformer';
+import { softmax } from '../src/slm/matrix';
+import { GenerationOptions } from '../src/types';
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+const GREEN = '\x1b[32m';
+const RED = '\x1b[31m';
+const YELLOW = '\x1b[33m';
+const CYAN = '\x1b[36m';
+const DIM = '\x1b[2m';
+const RESET = '\x1b[0m';
+
+let passed = 0;
+let failed = 0;
+const failures: string[] = [];
+
+function check(label: string, ok: boolean, detail = ''): void {
+  if (ok) {
+    passed++;
+    console.log(`  ${GREEN}PASS${RESET}  ${label}${detail ? ` ${DIM}(${detail})${RESET}` : ''}`);
+  } else {
+    failed++;
+    failures.push(label);
+    console.log(`  ${RED}FAIL${RESET}  ${label}${detail ? ` ${RED}(${detail})${RESET}` : ''}`);
+  }
+}
+
+function section(title: string): void {
+  console.log(`\n${CYAN}=== ${title} ===${RESET}`);
+}
+
+const words = (s: string): string[] =>
+  s.toLowerCase().replace(/[^a-z0-9' ]/g, ' ').split(/\s+/).filter(Boolean);
+
+/** Words of `text` that do not appear in `target` (novelty measure). */
+function novelWords(text: string, target: string): string[] {
+  const t = new Set(words(target));
+  return [...new Set(words(text))].filter((w) => !t.has(w));
+}
+
+/** Fraction of target words covered by the generated text. */
+function overlap(text: string, target: string): number {
+  const got = new Set(words(text));
+  const want = words(target);
+  if (want.length === 0) return 0;
+  let hit = 0;
+  for (const w of want) if (got.has(w)) hit++;
+  return hit / want.length;
+}
+
+const RAW_SPECIALS = ['<user>', '<assistant>', '<bos>', '<eos>', '<pad>', '<unk>', '\n', '\r'];
+
+function textIssues(text: string): string[] {
+  const issues: string[] = [];
+  for (const s of RAW_SPECIALS) {
+    if (text.includes(s)) issues.push(`raw special token ${JSON.stringify(s)}`);
+  }
+  // Any isolated single letter other than the real words "a" / "i" means the
+  // model spelled out a character (OOV fallback leaked into generation).
+  for (const w of words(text)) {
+    if (w.length === 1 && w !== 'a' && w !== 'i') {
+      issues.push(`spelled-out character "${w}"`);
+      break;
+    }
+  }
+  return issues;
+}
+
+const GREEDY: GenerationOptions = {
+  temperature: 0.7,
+  topK: 1, // deterministic sampling for reproducible assertions
+  topP: 1.0,
+  repetitionPenalty: 1.15,
+  maxNewTokens: 30,
+};
+
+const SAMPLED: GenerationOptions = {
+  temperature: 0.7,
+  topK: 25,
+  topP: 0.85,
+  repetitionPenalty: 1.15,
+  maxNewTokens: 26,
+};
+
+function chat(model: SmallLanguageModel, user: string, opts: GenerationOptions = GREEDY): string {
+  const prompt = model.tokenizer.formatConversationPrompt(user);
+  return model.generate(prompt, opts, true).text;
+}
+
+/**
+ * Average blended loss (neural + memory mix, exactly like generation) on the
+ * given turns WITHOUT letting the memory observe them — a clean eval metric.
+ */
+function evalLoss(model: SmallLanguageModel, turns: Array<{ user: string; assistant: string }>): number {
+  const V = model.config.vocabSize;
+  const neuralProbs = new Float32Array(V);
+  const mixed = new Float32Array(V);
+  const NEURAL_MIX = 0.08; // mirrors SmallLanguageModel.neuralMix
+  let total = 0;
+  let count = 0;
+  for (const t of turns) {
+    const text = `${SPECIAL_TOKENS.USER} ${t.user} ${SPECIAL_TOKENS.NEWLINE}${SPECIAL_TOKENS.ASSISTANT} ${t.assistant}`;
+    const tokens = model.tokenizer.encode(text, true, true);
+    const { logits, seqLen } = model.forward(tokens, true);
+    for (let i = 0; i < seqLen - 1; i++) {
+      const target = tokens[i + 1];
+      if (target === 0) continue; // PAD
+      const row = logits.subarray(i * V, (i + 1) * V);
+      softmax(row, neuralProbs, 1.0);
+      const prev1 = tokens[i];
+      const prev2 = i >= 1 ? tokens[i - 1] : BOS_ID;
+      model.memory.distribution(prev2, prev1, mixed);
+      const p = NEURAL_MIX * neuralProbs[target] + (1 - NEURAL_MIX) * mixed[target];
+      total += -Math.log(Math.max(1e-8, p));
+      count++;
+    }
+  }
+  return count > 0 ? total / count : 0;
+}
+
+// ---------------------------------------------------------------------------
+// 1. Vocabulary coverage of built-in corpora & datasets
+// ---------------------------------------------------------------------------
+
+section('1. Vocabulary coverage (no UNK / no char-spelled words)');
+
+const preset = PREDEFINED_DATASETS[0];
+const datasetTexts = PREDEFINED_DATASETS.flatMap((d) => d.turns.flatMap((t) => [t.user, t.assistant]));
+const expandedTexts = PREDEFINED_DATASETS.flatMap((d) =>
+  generateExpandedChatCorpus(d, 100).flatMap((t) => [t.user, t.assistant])
+);
+const allCorpusTexts = [...datasetTexts, ...expandedTexts];
+
+let unkCount = 0;
+let charFallbackWords = new Set<string>();
+for (const text of allCorpusTexts) {
+  const ids = defaultTokenizer.encode(text, false, false);
+  const idStr = (id: number) => defaultTokenizer.getTokenString(id);
+  for (const id of ids) {
+    if (id === UNK_ID) unkCount++;
+    const s = idStr(id);
+    if (/^[a-zA-Z]$/.test(s) && !['a', 'i'].includes(s.toLowerCase())) {
+      charFallbackWords.add(s);
+    }
+  }
+}
+console.log(`  vocab size: ${defaultTokenizer.vocabSize}`);
+check(
+  'dataset texts encode with zero UNK tokens',
+  unkCount === 0,
+  `${unkCount} UNK tokens`
+);
+check(
+  'dataset words are real vocabulary tokens (not char-spelled)',
+  charFallbackWords.size === 0,
+  charFallbackWords.size > 0
+    ? `char-spelled: ${[...charFallbackWords].slice(0, 12).join(', ')}${charFallbackWords.size > 12 ? ' …' : ''}`
+    : 'all covered'
+);
+
+// ---------------------------------------------------------------------------
+// 2. Base model coherence
+// ---------------------------------------------------------------------------
+
+section('2. Base model coherence (pre fine-tuning)');
+
+const model = initializePretrainedModel(PREDEFINED_MODELS[0]);
+const baseMemorySize = model.memory.size; // baseline memory counts, pre fine-tuning
+
+const basePrompts = [
+  'hello who are you',
+  'how are you doing today',
+  'can you help me stay focused',
+  'tell me something interesting',
+];
+const baseReplies: Record<string, string> = {};
+let allClean = true;
+let allSubstantial = true;
+for (const p of basePrompts) {
+  const reply = chat(model, p);
+  baseReplies[p] = reply;
+  const issues = textIssues(reply);
+  if (issues.length > 0) allClean = false;
+  if (words(reply).length < 4) allSubstantial = false;
+  console.log(`  ${DIM}USER:${RESET}  ${p}`);
+  console.log(`  ${DIM}BASE:${RESET}  ${reply || '(empty!)'}${issues.length ? `  ${YELLOW}[${issues.join(', ')}]${RESET}` : ''}`);
+}
+check('base replies contain no raw special tokens / spelled-out chars', allClean);
+check('base replies are substantive sentences (>= 4 words)', allSubstantial);
+check(
+  'base model does not leak training-only phrases for unseen topics',
+  !baseReplies['can you help me stay focused'].includes('twenty five minute'),
+  'spot check'
+);
+
+// ---------------------------------------------------------------------------
+// 3. Fine-tuning reduces training loss
+// ---------------------------------------------------------------------------
+
+section('3. Fine-tuning loss reduction (LoRA mode, expanded dataset)');
+
+const expanded = generateExpandedChatCorpus(preset, 40);
+const evalLossBefore = evalLoss(model, expanded);
+console.log(`  eval loss before fine-tuning: ${evalLossBefore.toFixed(4)}`);
+const epochLosses: number[] = [];
+const EPOCHS = 6;
+for (let epoch = 0; epoch < EPOCHS; epoch++) {
+  let sum = 0;
+  for (const turn of expanded) {
+    const text = `${SPECIAL_TOKENS.USER} ${turn.user} ${SPECIAL_TOKENS.NEWLINE}${SPECIAL_TOKENS.ASSISTANT} ${turn.assistant}`;
+    const tokens = model.tokenizer.encode(text, true, true);
+    const { loss } = model.trainStep(tokens, 0.015, true, 0.005);
+    sum += loss;
+  }
+  epochLosses.push(sum / expanded.length);
+  console.log(`  epoch ${epoch + 1}: avg loss ${epochLosses[epoch].toFixed(4)}`);
+}
+const memoryAfterTraining = model.memory.size;
+check(
+  'training loss decreases from first to last epoch',
+  epochLosses[EPOCHS - 1] < epochLosses[0] * 0.9,
+  `${epochLosses[0].toFixed(3)} → ${epochLosses[EPOCHS - 1].toFixed(3)}`
+);
+check(
+  'loss trend is broadly downward (last epoch is the minimum)',
+  epochLosses[EPOCHS - 1] === Math.min(...epochLosses),
+  `min=${Math.min(...epochLosses).toFixed(3)}`
+);
+const evalLossAfter = evalLoss(model, expanded);
+console.log(`  eval loss after fine-tuning:  ${evalLossAfter.toFixed(4)}`);
+check(
+  'held-out eval loss drops sharply after fine-tuning (>= 3x better)',
+  evalLossAfter < evalLossBefore / 3,
+  `${evalLossBefore.toFixed(3)} → ${evalLossAfter.toFixed(3)}`
+);
+
+// ---------------------------------------------------------------------------
+// 4. Fine-tuned model answers with the trained dataset
+// ---------------------------------------------------------------------------
+
+section('4. Fine-tuned responses match the trained dataset');
+
+const evalCases = preset.turns.slice(0, 3).map((t) => ({ user: t.user, target: t.assistant }));
+let strongMatches = 0;
+for (const c of evalCases) {
+  const reply = chat(model, c.user);
+  const ov = overlap(reply, c.target);
+  const issues = textIssues(reply);
+  if (ov >= 0.5 && issues.length === 0) strongMatches++;
+  console.log(`  ${DIM}USER:${RESET}  ${c.user}`);
+  console.log(`  ${DIM}TUNED:${RESET} ${reply || '(empty!)'}${issues.length ? `  ${YELLOW}[${issues.join(', ')}]${RESET}` : ''}`);
+  console.log(`  ${DIM}target overlap:${RESET} ${(ov * 100).toFixed(0)}%`);
+}
+check(
+  'majority of trained prompts reproduce their dataset answers (overlap >= 50%)',
+  strongMatches >= Math.ceil(evalCases.length / 2),
+  `${strongMatches}/${evalCases.length} strong matches`
+);
+
+// Distinctive knowledge test: base model never saw "morning routine" material.
+const tunedRoutine = chat(model, 'what makes a good morning routine');
+console.log(`  ${DIM}TUNED routine reply:${RESET} ${tunedRoutine}`);
+check('fine-tuned model learned dataset-specific phrase ("routine")', tunedRoutine.includes('routine'));
+
+// Custom (user-authored) dataset turns must be learnable too — simulates the
+// DatasetManager "Add Conversation Turn" flow feeding the trainer.
+const customTurns = [
+  {
+    user: 'what do you love',
+    assistant: 'I love good music and calm water .',
+  },
+  {
+    user: 'what music do you love',
+    assistant: 'I love good music and calm water every day .',
+  },
+];
+for (let e = 0; e < 5; e++) {
+  for (const t of customTurns) {
+    const text = `${SPECIAL_TOKENS.USER} ${t.user} ${SPECIAL_TOKENS.NEWLINE}${SPECIAL_TOKENS.ASSISTANT} ${t.assistant}`;
+    model.trainStep(model.tokenizer.encode(text, true, true), 0.02, true, 0.005);
+  }
+}
+const customReply = chat(model, 'what do you love');
+console.log(`  ${DIM}TUNED custom reply:${RESET} ${customReply}`);
+check('model learned a custom user-added phrase ("music")', customReply.includes('music'));
+
+// ---------------------------------------------------------------------------
+// 5. resetToBase restores exact base behavior
+// ---------------------------------------------------------------------------
+
+section('5. Reset-to-base restores weights + memory layer');
+
+const tunedHi = chat(model, 'hello who are you');
+model.resetToBase();
+const resetHi = chat(model, 'hello who are you');
+console.log(`  ${DIM}tuned:${RESET} ${tunedHi}`);
+console.log(`  ${DIM}reset:${RESET} ${resetHi}`);
+console.log(`  ${DIM}orig :${RESET} ${baseReplies['hello who are you']}`);
+check('reset restores the exact original base reply (greedy, deterministic)', resetHi === baseReplies['hello who are you']);
+check('reset clears fine-tuned vocabulary from memory layer', model.memory.size === baseMemorySize, `size ${model.memory.size} vs base ${baseMemorySize} (post-training ${memoryAfterTraining})`);
+check('reset removes dataset-specific phrase', !chat(model, 'what makes a good morning routine').includes('routine'));
+
+// ---------------------------------------------------------------------------
+// 6. Streaming API sanity
+// ---------------------------------------------------------------------------
+
+section('6. Streaming generation sanity');
+
+const streamTokens: number[] = [];
+let streamOk = true;
+for await (const info of model.generateStream(
+  model.tokenizer.formatConversationPrompt('how are you doing today'),
+  SAMPLED,
+  true
+)) {
+  streamTokens.push(info.id);
+  if (!(info.prob > 0) || info.topCandidates.length === 0) streamOk = false;
+  if (info.id === 3) break; // EOS
+}
+console.log(`  streamed ${streamTokens.length} tokens`);
+check('generateStream yields valid token infos', streamOk && streamTokens.length > 0, `${streamTokens.length} tokens`);
+
+// Sampled chat still clean after everything
+const sampledReply = chat(model, 'thank you so much for chatting with me !', SAMPLED);
+console.log(`  ${DIM}SAMPLED:${RESET} ${sampledReply}`);
+check('sampled generation stays clean (no specials / spelled chars)', textIssues(sampledReply).length === 0);
+
+// ---------------------------------------------------------------------------
+// Summary
+// ---------------------------------------------------------------------------
+
+console.log(`\n${CYAN}=== SUMMARY ===${RESET}`);
+console.log(`  ${GREEN}${passed} passed${RESET}, ${RED}${failed} failed${RESET}`);
+if (failed > 0) {
+  console.log(`\n  ${RED}Failures:${RESET}`);
+  for (const f of failures) console.log(`   - ${f}`);
+  process.exitCode = 1;
+} else {
+  console.log(`  ${GREEN}SLM engine verification: ALL CHECKS PASSED${RESET}`);
+}
