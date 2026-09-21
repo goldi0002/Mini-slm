@@ -33,69 +33,10 @@ export function createRandomNormalMatrix(rows: number, cols: number, std = 0.02)
 }
 
 /**
- * Matrix multiplication C = A x B
- * A is [m x k], B is [k x n], C is [m x n]
- */
-export function matmul(
-  A: Float32Array,
-  B: Float32Array,
-  C: Float32Array,
-  m: number,
-  k: number,
-  n: number
-): void {
-  C.fill(0);
-  for (let i = 0; i < m; i++) {
-    const i_k = i * k;
-    const i_n = i * n;
-    for (let p = 0; p < k; p++) {
-      const a_ip = A[i_k + p];
-      if (a_ip === 0) continue;
-      const p_n = p * n;
-      for (let j = 0; j < n; j++) {
-        C[i_n + j] += a_ip * B[p_n + j];
-      }
-    }
-  }
-}
-
-/**
- * Matrix-Vector multiplication y = W x x + b
- * W is [outDim x inDim], x is [inDim], b is [outDim] optional
- */
-export function linearForward(
-  x: Float32Array,
-  W: Float32Array,
-  b: Float32Array | null,
-  y: Float32Array,
-  inDim: number,
-  outDim: number
-): void {
-  for (let i = 0; i < outDim; i++) {
-    let sum = b ? b[i] : 0;
-    const rowOffset = i * inDim;
-    for (let j = 0; j < inDim; j++) {
-      sum += W[rowOffset + j] * x[j];
-    }
-    y[i] = sum;
-  }
-}
-
-/**
  * GELU activation function (Gaussian Error Linear Unit)
  */
 export function gelu(x: number): number {
   return 0.5 * x * (1.0 + Math.tanh(Math.sqrt(2.0 / Math.PI) * (x + 0.044715 * Math.pow(x, 3))));
-}
-
-export function geluDerivative(x: number): number {
-  // Approximate derivative of GELU
-  const s = Math.sqrt(2.0 / Math.PI);
-  const cube = x * x * x;
-  const arg = s * (x + 0.044715 * cube);
-  const tanhVal = Math.tanh(arg);
-  const sech2 = 1.0 - tanhVal * tanhVal;
-  return 0.5 * (1.0 + tanhVal) + 0.5 * x * sech2 * s * (1.0 + 3.0 * 0.044715 * x * x);
 }
 
 /**
@@ -159,7 +100,6 @@ export function softmax(logits: Float32Array, out: Float32Array, temp = 1.0): vo
  */
 export function sampleFromDistribution(
   probs: Float32Array,
-  temperature = 1.0,
   topK = 40,
   topP = 0.9,
   repetitionPenalty = 1.0,

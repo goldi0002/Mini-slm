@@ -26,12 +26,15 @@ interface ChatPlaygroundProps {
   model: SmallLanguageModel;
   isFinetuned: boolean;
   activeDatasetName?: string;
+  /** Builds a fresh, never-fine-tuned model used by the comparison view. */
+  createBaseModel: () => SmallLanguageModel;
 }
 
 export const ChatPlayground: React.FC<ChatPlaygroundProps> = ({
   model,
   isFinetuned,
   activeDatasetName,
+  createBaseModel,
 }) => {
   const [messages, setMessages] = useState<ChatMessage[]>([
     {
@@ -83,6 +86,18 @@ export const ChatPlayground: React.FC<ChatPlaygroundProps> = ({
 
   const chatEndRef = useRef<HTMLDivElement>(null);
 
+  // Lazily-built base checkpoint used only by the comparison view. A separate
+  // instance is what makes "Base" actually mean "never fine-tuned".
+  const baseModelRef = useRef<{ key: string; model: SmallLanguageModel } | null>(null);
+
+  const getBaseModel = (): SmallLanguageModel => {
+    const key = `${model.config.id}:${model.config.vocabSize}`;
+    if (baseModelRef.current?.key !== key) {
+      baseModelRef.current = { key, model: createBaseModel() };
+    }
+    return baseModelRef.current.model;
+  };
+
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, compareMessages, isGenerating]);
@@ -95,6 +110,19 @@ export const ChatPlayground: React.FC<ChatPlaygroundProps> = ({
     setInputPrompt('');
     setIsGenerating(true);
 
+    try {
+      await runGeneration(text);
+    } finally {
+      // Always release the UI, even if a generation step throws.
+      setIsGenerating(false);
+    }
+  };
+
+  /**
+   * Runs one generation turn. Split out of the submit handler so the handler
+   * can clear the busy flag on every path.
+   */
+  const runGeneration = async (text: string) => {
     const userMsgId = `user-${Date.now()}`;
     const userMsg: ChatMessage = {
       id: userMsgId,
@@ -143,7 +171,12 @@ export const ChatPlayground: React.FC<ChatPlaygroundProps> = ({
         }));
       }
 
-      // 2. Generate Base model response (without LoRA / with base snapshot)
+      // 2. Generate the Base model response from an independent, never-trained
+      // instance. Toggling LoRA off on the live model was not a base-model
+      // comparison: the statistical memory layer is shared state that
+      // fine-tuning mutates, and it supplies most of the sampling mass.
+      const baseModel = getBaseModel();
+      const basePrompt = baseModel.tokenizer.formatConversationPrompt(text);
       const baseId = `base-${Date.now()}`;
       const baseMsg: ChatMessage = {
         id: baseId,
@@ -160,9 +193,9 @@ export const ChatPlayground: React.FC<ChatPlaygroundProps> = ({
       }));
 
       const baseTokens: GeneratedTokenInfo[] = [];
-      for await (const tokenInfo of model.generateStream(prompt, options, false)) {
+      for await (const tokenInfo of baseModel.generateStream(basePrompt, options, true)) {
         baseTokens.push(tokenInfo);
-        const decoded = model.tokenizer.decode(
+        const decoded = baseModel.tokenizer.decode(
           baseTokens.map((t) => t.id),
           true
         );
@@ -211,8 +244,6 @@ export const ChatPlayground: React.FC<ChatPlaygroundProps> = ({
         );
       }
     }
-
-    setIsGenerating(false);
   };
 
   const clearChat = () => {

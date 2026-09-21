@@ -20,9 +20,26 @@
 import { PREDEFINED_MODELS, initializePretrainedModel } from '../src/slm/predefinedModels';
 import { PREDEFINED_DATASETS, generateExpandedChatCorpus } from '../src/slm/datasets';
 import { defaultTokenizer, SPECIAL_TOKENS, UNK_ID, BOS_ID } from '../src/slm/tokenizer';
-import { SmallLanguageModel } from '../src/slm/transformer';
+import { SmallLanguageModel, MIN_REPLY_TOKENS } from '../src/slm/transformer';
 import { softmax } from '../src/slm/matrix';
 import { GenerationOptions } from '../src/types';
+
+// ---------------------------------------------------------------------------
+// Reproducibility
+// ---------------------------------------------------------------------------
+// Evaluation has to be reproducible, so pin the RNG: it drives both weight
+// initialisation and sampled decoding. The decoding configuration is the GREEDY
+// and SAMPLED option objects below.
+
+const RANDOM_SEED = 20240921;
+let rngState = RANDOM_SEED;
+Math.random = (): number => {
+  rngState |= 0;
+  rngState = (rngState + 0x6d2b79f5) | 0;
+  let t = Math.imul(rngState ^ (rngState >>> 15), 1 | rngState);
+  t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+  return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -226,6 +243,8 @@ section('3. Fine-tuning loss reduction (LoRA, the dataset the studio trains on)'
 
 // The studio's default "Standard" scale trains on the selected dataset turns.
 const standardTurns = preset.turns;
+// NOTE: this is in-sample loss - these are the same turns training has just
+// seen. The genuine held-out measurement is section 8.
 const evalLossBefore = evalLoss(model, standardTurns);
 console.log(`  eval loss before fine-tuning: ${evalLossBefore.toFixed(4)}`);
 const epochLosses: number[] = [];
@@ -255,7 +274,7 @@ check(
 const evalLossAfter = evalLoss(model, standardTurns);
 console.log(`  eval loss after fine-tuning:  ${evalLossAfter.toFixed(4)}`);
 check(
-  'held-out eval loss drops sharply after fine-tuning (>= 3x better)',
+  'the turns it trained on are fitted (in-sample loss >= 3x better)',
   evalLossAfter < evalLossBefore / 3,
   `${evalLossBefore.toFixed(3)} → ${evalLossAfter.toFixed(3)}`
 );
@@ -378,6 +397,122 @@ check('generateStream yields valid token infos', streamOk && streamTokens.length
 const sampledReply = chat(model, 'thank you so much for chatting with me !', SAMPLED);
 console.log(`  ${DIM}SAMPLED:${RESET} ${sampledReply}`);
 check('sampled generation stays clean (no specials / spelled chars)', textIssues(sampledReply).length === 0);
+
+// ---------------------------------------------------------------------------
+// 7. Replies do not collapse to a stub
+// ---------------------------------------------------------------------------
+// The memory layer ranks EOS highly right after a sentence-ending period, so
+// unguarded sampling used to end some replies after a single token, producing a
+// bare "." or one-word answer. Generation holds EOS back for the first
+// MIN_REPLY_TOKENS tokens to prevent that.
+
+section('7. Sampled replies do not collapse to a stub');
+
+const stubPrompts = [
+  'hello how are you doing today ?',
+  'who are you and how can you help me ?',
+  'I feel overwhelmed with my daily tasks',
+  'can you give me advice on staying focused ?',
+  'what makes a good morning routine ?',
+  'thank you so much for chatting with me !',
+];
+
+let stubCount = 0;
+let minReplyWords = Infinity;
+let minReplyTokens = Infinity;
+let shortestStub = '';
+for (const p of stubPrompts) {
+  for (let i = 0; i < 6; i++) {
+    const out = model.generate(model.tokenizer.formatConversationPrompt(p), SAMPLED, true);
+    const wordCount = words(out.text).length;
+    minReplyWords = Math.min(minReplyWords, wordCount);
+    minReplyTokens = Math.min(minReplyTokens, out.tokens.length);
+    if (wordCount < 3) {
+      stubCount++;
+      shortestStub = out.text;
+    }
+  }
+}
+if (shortestStub) {
+  console.log(`  ${YELLOW}shortest stub:${RESET} ${JSON.stringify(shortestStub)}`);
+}
+console.log(
+  `  ${stubPrompts.length * 6} sampled replies | shortest: ${minReplyWords} words / ${minReplyTokens} tokens`
+);
+check(
+  'no sampled reply collapses to a one-word answer',
+  minReplyWords >= 2,
+  `shortest reply ${minReplyWords} words`
+);
+check(
+  'every reply runs past the EOS hold-back window before it can end',
+  minReplyTokens >= MIN_REPLY_TOKENS,
+  `shortest reply ${minReplyTokens} tokens (hold-back ${MIN_REPLY_TOKENS})`
+);
+
+// ---------------------------------------------------------------------------
+// 8. Held-out generalisation (train / validation split)
+// ---------------------------------------------------------------------------
+// Section 3 trains and evaluates on the same turns, so its falling loss shows
+// only that the model fits its training data. This section holds turns out of
+// training entirely and measures the gap, which is what an "eval loss" claim
+// actually needs to mean.
+
+section('8. Held-out generalisation (train / validation split)');
+
+const valIndices = [5, 6, 7];
+const splitTrainTurns = preset.turns.filter((_, i) => !valIndices.includes(i));
+const splitHeldOutTurns = preset.turns.filter((_, i) => valIndices.includes(i));
+const otherDomainTurns = PREDEFINED_DATASETS[1].turns;
+
+const splitModel = initializePretrainedModel(PREDEFINED_MODELS[1]);
+const lossBefore = {
+  inSample: evalLoss(splitModel, splitTrainTurns),
+  heldOut: evalLoss(splitModel, splitHeldOutTurns),
+  otherDomain: evalLoss(splitModel, otherDomainTurns),
+};
+
+const SPLIT_EPOCHS = 6;
+for (let epoch = 0; epoch < SPLIT_EPOCHS; epoch++) {
+  for (const turn of splitTrainTurns) {
+    const text = `${SPECIAL_TOKENS.USER} ${turn.user} ${SPECIAL_TOKENS.NEWLINE}${SPECIAL_TOKENS.ASSISTANT} ${turn.assistant}`;
+    splitModel.trainStep(splitModel.tokenizer.encode(text, true, true), 0.015, true, 0.005);
+  }
+}
+
+const lossAfter = {
+  inSample: evalLoss(splitModel, splitTrainTurns),
+  heldOut: evalLoss(splitModel, splitHeldOutTurns),
+  otherDomain: evalLoss(splitModel, otherDomainTurns),
+};
+const generalisationGap = lossAfter.heldOut - lossAfter.inSample;
+
+console.log(
+  `  split: ${splitTrainTurns.length} train / ${splitHeldOutTurns.length} held-out / ${otherDomainTurns.length} other-domain`
+);
+console.log(`  in-sample    ${lossBefore.inSample.toFixed(3)} -> ${lossAfter.inSample.toFixed(3)}`);
+console.log(`  held-out     ${lossBefore.heldOut.toFixed(3)} -> ${lossAfter.heldOut.toFixed(3)}`);
+console.log(`  other-domain ${lossBefore.otherDomain.toFixed(3)} -> ${lossAfter.otherDomain.toFixed(3)}`);
+console.log(`  generalisation gap after fine-tuning: ${generalisationGap.toFixed(3)} nats`);
+console.log(
+  `  ${DIM}read this as: fine-tuning fits the turns it saw; it does not improve loss on\n  unseen ones, so answer quality for trained prompts comes from dialogue-case\n  replay in the memory layer, not from generalisation.${RESET}`
+);
+
+check(
+  'fine-tuning fits its own training turns (in-sample loss at least halves)',
+  lossAfter.inSample < lossBefore.inSample / 2,
+  `${lossBefore.inSample.toFixed(3)} -> ${lossAfter.inSample.toFixed(3)}`
+);
+check(
+  'held-out turns do not regress beyond a small tolerance',
+  lossAfter.heldOut <= lossBefore.heldOut * 1.05,
+  `${lossBefore.heldOut.toFixed(3)} -> ${lossAfter.heldOut.toFixed(3)}`
+);
+check(
+  'the generalisation gap is measured rather than assumed away',
+  generalisationGap > 0,
+  `${generalisationGap.toFixed(3)} nats, reported above`
+);
 
 // ---------------------------------------------------------------------------
 // Summary

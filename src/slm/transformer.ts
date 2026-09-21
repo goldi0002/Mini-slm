@@ -15,6 +15,17 @@ import {
   sampleFromDistribution
 } from './matrix';
 
+/**
+ * How many tokens a reply must produce before it is allowed to stop.
+ *
+ * The memory layer legitimately ranks EOS right after a sentence-ending period,
+ * and sampling would occasionally take it after a single token — producing a
+ * bare "." or one-word answer. Generation is already bounded by maxNewTokens,
+ * so holding EOS back for the first few tokens only ever turns a stub into a
+ * sentence.
+ */
+export const MIN_REPLY_TOKENS = 6;
+
 export interface AttentionLayerWeights {
   q_proj: Float32Array; // [dModel, dModel]
   k_proj: Float32Array;
@@ -90,6 +101,9 @@ export class SmallLanguageModel {
   // soon as generation diverges from the learned answer.
   private caseReply: number[] | null = null;
   private casePos = 0;
+
+  // Tokens produced for the current reply, used to hold back a premature EOS.
+  private generatedCount = 0;
 
   // Share of the final sampling distribution that comes from the neural
   // forward pass; the remainder comes from the statistical memory layer.
@@ -713,7 +727,7 @@ export class SmallLanguageModel {
             for (let c = 0; c < dModel; c++) {
               aVal += layer.lora_v_A[aOffset + c] * hidden[hOffset + c];
             }
-            layer.lora_v_B[bRow + r] -= factor * aVal;
+            layer.lora_v_B[bRow + r] -= factor * aVal + learningRate * weightDecay * layer.lora_v_B[bRow + r];
           }
         }
       } else {
@@ -725,7 +739,9 @@ export class SmallLanguageModel {
           if (Math.abs(grad) < 0.004) continue; // skip negligible gradients
           const vOffset = v * dModel;
           for (let d = 0; d < dModel; d++) {
-            this.weights.lm_head[vOffset + d] -= lr * grad * hidden[hOffset + d];
+            const w = this.weights.lm_head[vOffset + d];
+            // Cross-entropy gradient plus L2 weight decay.
+            this.weights.lm_head[vOffset + d] -= lr * (grad * hidden[hOffset + d] + weightDecay * w);
           }
         }
       }
@@ -754,9 +770,12 @@ export class SmallLanguageModel {
     const lastOffset = (seqLen - 1) * vocabSize;
     const rawLogits = logits.subarray(lastOffset, lastOffset + vocabSize);
 
-    // --- Neural distribution (temperature-scaled softmax over logits) ---
+    // --- Neural distribution (raw softmax) ---
+    // Temperature is applied exactly once, to the blended distribution below.
+    // Scaling the logits here *and* re-sharpening the mix would square the
+    // effect, so a slider value of 0.7 would sample like ~0.49.
     const neuralProbs = new Float32Array(vocabSize);
-    softmax(rawLogits, neuralProbs, options.temperature);
+    softmax(rawLogits, neuralProbs, 1.0);
 
     // --- Statistical memory distribution (trigram -> bigram -> unigram backoff) ---
     const n = tokens.length;
@@ -817,6 +836,11 @@ export class SmallLanguageModel {
         p = 0;
       }
 
+      // Keep EOS available, but not before the reply has actually started.
+      if (v === EOS_ID && this.generatedCount < MIN_REPLY_TOKENS) {
+        p = 0;
+      }
+
       // Never spell out OOV words character by character
       if (isLetterChar(v)) {
         p = 0;
@@ -858,7 +882,6 @@ export class SmallLanguageModel {
     // Sample next token
     const sample = sampleFromDistribution(
       probs,
-      options.temperature,
       options.topK,
       options.topP,
       options.repetitionPenalty,
@@ -873,6 +896,8 @@ export class SmallLanguageModel {
       if (sample.chosenId === caseToken) this.casePos++;
       else this.caseReply = null;
     }
+
+    this.generatedCount++;
 
     const topCandidates = sample.candidates.map(c => ({
       id: c.id,
@@ -942,6 +967,7 @@ export class SmallLanguageModel {
     this.pendingReplyWord = null;
     this.caseReply = null;
     this.casePos = 0;
+    this.generatedCount = 0;
     const asstIdx = tokens.lastIndexOf(ASSISTANT_ID);
     if (asstIdx >= 0) {
       // Replay the answer fine-tuning learned for this user message.

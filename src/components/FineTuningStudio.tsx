@@ -20,15 +20,20 @@ import {
 import { 
   TrainingHyperparams, 
   LossPoint, 
-  TrainingState 
+  TrainingState,
+  DatasetPreset
 } from '../types';
 import { SmallLanguageModel } from '../slm/transformer';
-import { PREDEFINED_DATASETS, generateExpandedChatCorpus } from '../slm/datasets';
+import { generateExpandedChatCorpus } from '../slm/datasets';
 import { SPECIAL_TOKENS } from '../slm/tokenizer';
 
 interface FineTuningStudioProps {
   model: SmallLanguageModel;
+  /** The live datasets (owned by App) including user-authored and imported turns. */
+  datasets: DatasetPreset[];
   onTrainingComplete: (datasetName: string) => void;
+  /** Called after the weights are reset, so App can clear its fine-tuned state. */
+  onWeightsReset: () => void;
   onNavigateToChat: () => void;
   activeDatasetId: string;
   setActiveDatasetId: (id: string) => void;
@@ -36,7 +41,9 @@ interface FineTuningStudioProps {
 
 export const FineTuningStudio: React.FC<FineTuningStudioProps> = ({
   model,
+  datasets,
   onTrainingComplete,
+  onWeightsReset,
   onNavigateToChat,
   activeDatasetId,
   setActiveDatasetId,
@@ -68,7 +75,7 @@ export const FineTuningStudio: React.FC<FineTuningStudioProps> = ({
   const isPausedRef = useRef(false);
 
   const selectedPreset =
-    PREDEFINED_DATASETS.find((d) => d.id === activeDatasetId) || PREDEFINED_DATASETS[0];
+    datasets.find((d) => d.id === activeDatasetId) || datasets[0];
 
   // Resolve active training dataset depending on scale selector
   const activeTurns = React.useMemo(() => {
@@ -231,6 +238,9 @@ export const FineTuningStudio: React.FC<FineTuningStudioProps> = ({
   const resetWeights = () => {
     stopTraining();
     model.resetToBase();
+    // Tell App the model is back at its base checkpoint so the header badge,
+    // the chat playground's LoRA switch and the dataset label all follow.
+    onWeightsReset();
     setTrainingState({
       isTraining: false,
       isPaused: false,
@@ -401,7 +411,7 @@ export const FineTuningStudio: React.FC<FineTuningStudioProps> = ({
             </div>
 
             <div className="space-y-2">
-              {PREDEFINED_DATASETS.map((dataset) => {
+              {datasets.map((dataset) => {
                 const isSelected = dataset.id === activeDatasetId;
                 return (
                   <button

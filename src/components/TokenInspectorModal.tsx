@@ -16,7 +16,11 @@ export const TokenInspectorModal: React.FC<TokenInspectorModalProps> = ({ tokenI
   if (!tokenInfo) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 backdrop-blur-xs p-4 animate-in fade-in duration-150">
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 backdrop-blur-xs p-4 animate-in fade-in duration-150"
+      onClick={onClose}
+      role="presentation"
+    >
       <div 
         className="bg-white rounded-2xl shadow-xl border border-slate-200 w-full max-w-md overflow-hidden"
         onClick={(e) => e.stopPropagation()}

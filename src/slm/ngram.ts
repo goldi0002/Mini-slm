@@ -28,8 +28,6 @@ export interface NgramSnapshot {
   cases: Map<string, number[]>;
 }
 
-const EMPTY_MAP: Map<number, number> = new Map();
-
 export class NgramLanguageModel {
   public vocabSize: number;
   private tables: NgramSnapshot;
@@ -191,34 +189,6 @@ export class NgramLanguageModel {
   }
 
   /**
-   * Probability of `next` given the two preceding tokens, with interpolation:
-   * weighted mix of trigram, bigram, unigram (levels fall back when unseen).
-   */
-  public prob(next: number, prev2: number, prev1: number, tables?: NgramSnapshot): number {
-    const t = tables ?? this.tables;
-    let p = 0;
-    let weightSum = 0;
-
-    // Unigram always available
-    p += 0.15 * ((t.uni.get(next) ?? 0) / Math.max(1, t.total));
-    weightSum += 0.15;
-
-    const biMap = t.bi.get(prev1);
-    if (biMap) {
-      p += 0.35 * ((biMap.get(next) ?? 0) / Math.max(1, this.mapSum(biMap)));
-      weightSum += 0.35;
-    }
-
-    const triMap = t.tri.get(this.key(prev2, prev1));
-    if (triMap) {
-      p += 0.5 * ((triMap.get(next) ?? 0) / Math.max(1, this.mapSum(triMap)));
-      weightSum += 0.5;
-    }
-
-    return p / weightSum;
-  }
-
-  /**
    * Compute the full next-token distribution for a context, efficiently.
    * Fills `out` (length >= vocabSize) using stage-wise backoff: when a deeper
    * context (trigram, then bigram) was observed, it dominates the
@@ -266,15 +236,6 @@ export class NgramLanguageModel {
     }
   }
 
-  /** Deepest matching context length (3 = trigram hit, 2 = bigram, 1 = unigram, 0 = none). */
-  public contextDepth(prev2: number, prev1: number, tables?: NgramSnapshot): number {
-    const t = tables ?? this.tables;
-    if (t.tri.has(this.key(prev2, prev1))) return 3;
-    if (t.bi.has(prev1)) return 2;
-    if (t.uni.size > 0) return 1;
-    return 0;
-  }
-
   private static copyNested(src: Map<number, Map<number, number>>): Map<number, Map<number, number>> {
     const dst = new Map<number, Map<number, number>>();
     for (const [k, m] of src) dst.set(k, new Map(m));
@@ -312,6 +273,4 @@ export class NgramLanguageModel {
   public get size(): number {
     return this.tables.total;
   }
-
-  public static readonly emptyMap: Map<number, number> = EMPTY_MAP;
 }
