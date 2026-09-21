@@ -46,7 +46,10 @@ const CONVERSATIONAL_VOCAB = [
   'hello', 'hi', 'hey', 'greetings', 'welcome', 'morning', 'afternoon', 'evening', 'night', 'goodbye', 'bye',
 
   // Pronouns & Articles
-  'i', 'you', 'he', 'she', 'it', 'we', 'they', 'me', 'him', 'her', 'us', 'them',
+  // Capital "I" is a real word token: it opens most assistant replies, and if it
+  // fell through to the single-character OOV alphabet it would be suppressed
+  // during generation (making "I am ..." impossible to produce).
+  'I', 'i', 'you', 'he', 'she', 'it', 'we', 'they', 'me', 'him', 'her', 'us', 'them',
   'my', 'your', 'his', 'its', 'our', 'their', 'mine', 'yours',
   'a', 'an', 'the', 'this', 'that', 'these', 'those',
 
@@ -96,6 +99,10 @@ export class Tokenizer {
   private idToToken: Map<number, string> = new Map();
   public vocabSize: number;
 
+  // Ids that exist purely as the single-character OOV fallback alphabet.
+  // Real single-letter words ("a", "i") are NOT fallback tokens.
+  private fallbackCharIds: Set<number> = new Set();
+
   constructor() {
     const seen = new Set<string>();
     let id = 0;
@@ -116,20 +123,61 @@ export class Tokenizer {
         seen.add(char);
         this.tokenToId.set(char, id);
         this.idToToken.set(id, char);
+        this.fallbackCharIds.add(id);
         id++;
       }
     }
     for (let c = 65; c <= 90; c++) {
       const char = String.fromCharCode(c);
+      // Never create an uppercase fallback for a letter that already exists as a
+      // lowercase word ("A" -> 'a', "I" -> 'I'): the uppercase entry would
+      // shadow the real word and then be suppressed during generation.
+      if (this.tokenToId.has(char.toLowerCase())) continue;
       if (!seen.has(char)) {
         seen.add(char);
         this.tokenToId.set(char, id);
         this.idToToken.set(id, char);
+        this.fallbackCharIds.add(id);
         id++;
       }
     }
 
     this.vocabSize = id;
+  }
+
+  /** True when the token is a single-character OOV fallback (never a real word). */
+  public isFallbackCharToken(id: number): boolean {
+    return this.fallbackCharIds.has(id);
+  }
+
+  /**
+   * Add a word token (lowercased) if it is not already in the vocabulary.
+   * Used to teach the tokenizer the vocabulary of built-in corpora and
+   * datasets before models are constructed, so no word is ever reduced to
+   * single-character fallback tokens that generation suppresses.
+   */
+  public addWord(raw: string): boolean {
+    const word = raw.toLowerCase().trim();
+    if (word.length < 2) return false;
+    if (!/^[a-z0-9]+(?:'[a-z]+)?$/.test(word)) return false;
+    if (this.tokenToId.has(word)) return false;
+    const id = this.vocabSize;
+    this.tokenToId.set(word, id);
+    this.idToToken.set(id, word);
+    this.vocabSize = id + 1;
+    return true;
+  }
+
+  /** Teach the tokenizer every word appearing in the given texts. Returns added count. */
+  public learnWords(texts: string[]): number {
+    let added = 0;
+    const wordRegex = /[a-zA-Z0-9]+(?:'[a-zA-Z]+)?/g;
+    for (const text of texts) {
+      for (const match of text.matchAll(wordRegex)) {
+        if (this.addWord(match[0])) added++;
+      }
+    }
+    return added;
   }
 
   /**
@@ -225,6 +273,7 @@ export class Tokenizer {
 
     // Clean up formatting
     return result
+      .replace(/ {2,}/g, ' ')
       .replace(/\s+([!?,.:;])/g, '$1')
       .replace(/([!?,.:;])([a-zA-Z])/g, '$1 $2')
       .trim();
@@ -232,6 +281,11 @@ export class Tokenizer {
 
   public getTokenString(id: number): string {
     return this.idToToken.get(id) ?? `<id:${id}>`;
+  }
+
+  /** Look up the id of an exact token string, or undefined when unknown. */
+  public idOf(token: string): number | undefined {
+    return this.tokenToId.get(token);
   }
 
   public formatConversationPrompt(userMessage: string, history: Array<{ role: string; content: string }> = []): string {
