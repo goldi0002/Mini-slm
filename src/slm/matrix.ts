@@ -40,6 +40,18 @@ export function gelu(x: number): number {
 }
 
 /**
+ * Derivative of the tanh-approximation GELU used above.
+ */
+export function geluDerivative(x: number): number {
+  const s = Math.sqrt(2.0 / Math.PI);
+  const inner = x + 0.044715 * x * x * x;
+  const tanhVal = Math.tanh(s * inner);
+  const sech2 = 1.0 - tanhVal * tanhVal;
+  // d/dx [0.5x(1 + tanh(s(x + a x^3)))] where a = 0.044715
+  return 0.5 * (1.0 + tanhVal) + 0.5 * x * sech2 * s * (1.0 + 3.0 * 0.044715 * x * x);
+}
+
+/**
  * Layer Normalization
  */
 export function layerNorm(
@@ -70,6 +82,54 @@ export function layerNorm(
   }
 
   return { mean, invStd };
+}
+
+/**
+ * Backward pass of layerNorm: given dy (gradient w.r.t. the normalized output),
+ * produce dx (gradient w.r.t. the input). `x` and `dy` are read from the given
+ * offsets so callers can pass shared row-major buffers. `dy` and `dx` must not
+ * alias.
+ */
+export function layerNormBackward(
+  x: Float32Array,
+  xOffset: number,
+  gamma: Float32Array,
+  dy: Float32Array,
+  dyOffset: number,
+  dx: Float32Array,
+  dxOffset: number,
+  dim: number,
+  eps = 1e-5
+): void {
+  let mean = 0;
+  for (let i = 0; i < dim; i++) mean += x[xOffset + i];
+  mean /= dim;
+
+  let variance = 0;
+  for (let i = 0; i < dim; i++) {
+    const diff = x[xOffset + i] - mean;
+    variance += diff * diff;
+  }
+  variance /= dim;
+  const invStd = 1.0 / Math.sqrt(variance + eps);
+
+  // sumG  = sum_k dy_k * gamma_k
+  // sumGX = sum_k dy_k * gamma_k * xhat_k
+  let sumG = 0;
+  let sumGX = 0;
+  for (let i = 0; i < dim; i++) {
+    const xhat = (x[xOffset + i] - mean) * invStd;
+    const g = dy[dyOffset + i] * gamma[i];
+    sumG += g;
+    sumGX += g * xhat;
+  }
+
+  const invDim = 1.0 / dim;
+  for (let i = 0; i < dim; i++) {
+    const xhat = (x[xOffset + i] - mean) * invStd;
+    const g = dy[dyOffset + i] * gamma[i];
+    dx[dxOffset + i] = invStd * (g - sumG * invDim - xhat * sumGX * invDim);
+  }
 }
 
 /**

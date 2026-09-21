@@ -13,12 +13,22 @@ import { PREDEFINED_MODELS, initializePretrainedModel } from './slm/predefinedMo
 import { PREDEFINED_DATASETS } from './slm/datasets';
 import { defaultTokenizer } from './slm/tokenizer';
 import { DatasetPreset, ModelConfig } from './types';
+import { SmallLanguageModel } from './slm/transformer';
+
+// Building a model also pre-trains it on the warm-up corpus, and StrictMode
+// invokes state initialisers twice in development. Caching the instance keeps
+// startup from paying for that twice.
+let initialModel: SmallLanguageModel | null = null;
+function getInitialModel(): SmallLanguageModel {
+  if (!initialModel) initialModel = initializePretrainedModel(PREDEFINED_MODELS[0]);
+  return initialModel;
+}
 
 export default function App() {
   const [selectedModelConfig, setSelectedModelConfig] = useState<ModelConfig>(PREDEFINED_MODELS[0]);
 
   // Initialize the SLM instance in state
-  const [model, setModel] = useState(() => initializePretrainedModel(PREDEFINED_MODELS[0]));
+  const [model, setModel] = useState(getInitialModel);
   const [isFinetuned, setIsFinetuned] = useState(false);
 
   // Conversation datasets are owned here so the Dataset Manager's edits and

@@ -515,6 +515,184 @@ check(
 );
 
 // ---------------------------------------------------------------------------
+// 9. LoRA adapter gradients (finite differences)
+// ---------------------------------------------------------------------------
+// The adapter update used to be a hand-rolled heuristic: a single `lora_v_B`
+// row, picked by `targetToken % dModel`, nudged by the loss gradient. Nothing
+// tied that row to the loss, and `lora_q_A`/`lora_q_B` were never updated at
+// all. Training now differentiates the cross-entropy for real, and this section
+// is the guard on it: the analytic gradient must match a numerical one, or
+// "fine-tuning" has quietly gone back to guessing.
+
+section('9. Adapter gradients match numerical differentiation');
+
+/** Mean cross-entropy of the neural distribution alone (no memory blend). */
+function neuralLoss(model: SmallLanguageModel, tokens: number[]): number {
+  const V = model.config.vocabSize;
+  const probs = new Float32Array(V);
+  const { logits, seqLen } = model.forward(tokens, true);
+  let total = 0;
+  let count = 0;
+  for (let i = 0; i < seqLen - 1; i++) {
+    const target = tokens[i + 1];
+    if (target === 0) continue; // PAD
+    const row = logits.subarray(i * V, (i + 1) * V);
+    softmax(row, probs, 1.0);
+    total += -Math.log(Math.max(1e-8, probs[target]));
+    count++;
+  }
+  return count > 0 ? total / count : 0;
+}
+
+const gradModel = initializePretrainedModel(PREDEFINED_MODELS[0]);
+const gradTokens = gradModel.tokenizer.encode(
+  `${SPECIAL_TOKENS.USER} how are you feeling today ? ${SPECIAL_TOKENS.NEWLINE}` +
+    `${SPECIAL_TOKENS.ASSISTANT} I am doing well , thank you for asking .`,
+  true,
+  true
+);
+
+// Sample adapter weights from every adapter matrix of every layer.
+const gradSlots: Array<{ name: string; arr: Float32Array; idx: number }> = [];
+for (let l = 0; l < gradModel.weights.layers.length; l++) {
+  for (const key of ['lora_q_A', 'lora_q_B', 'lora_v_A', 'lora_v_B'] as const) {
+    const arr = gradModel.weights.layers[l][key];
+    for (const idx of [0, Math.floor(arr.length / 2)]) {
+      gradSlots.push({ name: `layer${l}.${key}[${idx}]`, arr, idx });
+    }
+  }
+}
+
+const gradLoss = neuralLoss(gradModel, gradTokens);
+const FD_EPS = 0.01;
+// The forward pass is float32, so the loss is quantised at roughly loss * 2^-23
+// and a central difference divides that granularity by 2*eps. Below this, a
+// difference is unmeasurable rather than wrong.
+const fdNoiseFloor = (gradLoss * Math.pow(2, -23)) / (2 * FD_EPS);
+const numericGrad: number[] = [];
+for (const slot of gradSlots) {
+  const w = slot.arr[slot.idx];
+  slot.arr[slot.idx] = w + FD_EPS;
+  const up = neuralLoss(gradModel, gradTokens);
+  slot.arr[slot.idx] = w - FD_EPS;
+  const down = neuralLoss(gradModel, gradTokens);
+  slot.arr[slot.idx] = w;
+  numericGrad.push((up - down) / (2 * FD_EPS));
+}
+
+// Snapshot the frozen base weights, then run one lr=1 step: with no weight
+// decay that applies exactly -gradient to every adapter.
+const frozenProbes = [
+  gradModel.weights.wte,
+  gradModel.weights.lm_head,
+  gradModel.weights.layers[0].q_proj,
+  gradModel.weights.layers[0].fc1,
+  gradModel.weights.ln_f_gamma
+];
+const frozenCopies = frozenProbes.map((w) => w.slice(0, 64));
+
+const gradBefore = gradSlots.map((s) => s.arr[s.idx]);
+gradModel.trainStep(gradTokens, 1.0, true, 0.0);
+const analyticGrad = gradSlots.map((s, i) => gradBefore[i] - s.arr[s.idx]);
+
+let gradWorstAbs = 0;
+let gradWorstName = '';
+let gradResolvable = 0;
+let gradSignMismatches = 0;
+for (let i = 0; i < gradSlots.length; i++) {
+  const absErr = Math.abs(analyticGrad[i] - numericGrad[i]);
+  if (absErr > gradWorstAbs) {
+    gradWorstAbs = absErr;
+    gradWorstName = gradSlots[i].name;
+  }
+  if (numericGrad[i] !== 0 && Math.sign(analyticGrad[i]) !== Math.sign(numericGrad[i])) {
+    gradSignMismatches++;
+  }
+  if (Math.abs(numericGrad[i]) > 10 * fdNoiseFloor) gradResolvable++;
+}
+console.log(
+  `  ${gradSlots.length} sampled adapter weights (${gradResolvable} resolvable above the float32 noise floor)`
+);
+console.log(
+  `  worst absolute error ${gradWorstAbs.toExponential(2)} (${gradWorstName}), noise floor ${fdNoiseFloor.toExponential(2)}`
+);
+check(
+  'analytic LoRA gradient matches numerical differentiation',
+  gradWorstAbs < 5 * fdNoiseFloor,
+  `worst ${gradWorstAbs.toExponential(2)} vs floor ${fdNoiseFloor.toExponential(2)}`
+);
+check(
+  'analytic gradient points the same way as the numerical one',
+  gradSignMismatches === 0,
+  `${gradSignMismatches} sign mismatches out of ${gradSlots.length}`
+);
+
+// LoRA only trains the adapters, so the pretrained network must be untouched
+// even after an aggressive lr=1 step.
+const baseStillFrozen = frozenProbes.every((w, i) => {
+  for (let j = 0; j < frozenCopies[i].length; j++) {
+    if (w[j] !== frozenCopies[i][j]) return false;
+  }
+  return true;
+});
+check('LoRA training leaves every base weight untouched', baseStillFrozen);
+
+// And the gradient has to be useful: the adapters must measurably fit the
+// sequence they were trained on. This is the check that would have caught the
+// old heuristic, which moved weights without tracking the loss.
+const loraFitModel = initializePretrainedModel(PREDEFINED_MODELS[0]);
+const loraFitTurns = preset.turns.slice(0, 3).map((t) =>
+  loraFitModel.tokenizer.encode(
+    `${SPECIAL_TOKENS.USER} ${t.user} ${SPECIAL_TOKENS.NEWLINE}${SPECIAL_TOKENS.ASSISTANT} ${t.assistant}`,
+    true,
+    true
+  )
+);
+const loraFitBefore =
+  loraFitTurns.reduce((sum, tokens) => sum + neuralLoss(loraFitModel, tokens), 0) / loraFitTurns.length;
+
+// Snapshot the adapters so the check below is "these weights changed", not
+// "these weights are non-zero" — the A matrices are randomly initialised, so a
+// mere non-zero test would pass on a trainer that never touches them.
+const adapterSnapshot = loraFitModel.weights.layers.map((layer) =>
+  (['lora_q_A', 'lora_q_B', 'lora_v_A', 'lora_v_B'] as const).map((key) => layer[key].slice())
+);
+
+for (let epoch = 0; epoch < 6; epoch++) {
+  for (const tokens of loraFitTurns) loraFitModel.trainStep(tokens, 0.05, true, 0.005);
+}
+
+const adapterKeys = ['lora_q_A', 'lora_q_B', 'lora_v_A', 'lora_v_B'] as const;
+let movedMatrices = 0;
+let totalMatrices = 0;
+for (let l = 0; l < loraFitModel.weights.layers.length; l++) {
+  for (let k = 0; k < adapterKeys.length; k++) {
+    totalMatrices++;
+    const after = loraFitModel.weights.layers[l][adapterKeys[k]];
+    const before = adapterSnapshot[l][k];
+    for (let i = 0; i < after.length; i++) {
+      if (after[i] !== before[i]) {
+        movedMatrices++;
+        break;
+      }
+    }
+  }
+}
+check(
+  'every layer updates all four adapter matrices',
+  movedMatrices === totalMatrices,
+  `${movedMatrices}/${totalMatrices} matrices changed`
+);
+const loraFitAfter =
+  loraFitTurns.reduce((sum, tokens) => sum + neuralLoss(loraFitModel, tokens), 0) / loraFitTurns.length;
+console.log(`  neural in-sample loss ${loraFitBefore.toFixed(3)} -> ${loraFitAfter.toFixed(3)} (adapters only)`);
+check(
+  'the adapters measurably fit the turns they are trained on',
+  loraFitAfter < loraFitBefore * 0.97,
+  `${loraFitBefore.toFixed(3)} -> ${loraFitAfter.toFixed(3)}`
+);
+
+// ---------------------------------------------------------------------------
 // Summary
 // ---------------------------------------------------------------------------
 
