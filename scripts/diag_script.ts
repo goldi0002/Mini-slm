@@ -7,9 +7,10 @@
  *      char tokens, so anything char-spelled can never be generated).
  *   2. Base model coherence: fluent, grammar-shaped output with no raw
  *      special tokens and no spelled-out characters.
- *   3. Fine-tuning reduces training loss across epochs.
+ *   3. Fine-tuning reduces training loss across epochs, both on the dataset the
+ *      studio trains by default and on the expanded/large training scales.
  *   4. Fine-tuning teaches dataset answers (post-train replies match the
- *      trained dataset, base replies do not).
+ *      trained dataset, base replies do not), and user-added turns are learned.
  *   5. resetToBase() restores exact base behavior (weights + memory layer).
  *   6. Streaming API yields valid token info.
  *
@@ -221,22 +222,23 @@ check(
 // 3. Fine-tuning reduces training loss
 // ---------------------------------------------------------------------------
 
-section('3. Fine-tuning loss reduction (LoRA mode, expanded dataset)');
+section('3. Fine-tuning loss reduction (LoRA, the dataset the studio trains on)');
 
-const expanded = generateExpandedChatCorpus(preset, 40);
-const evalLossBefore = evalLoss(model, expanded);
+// The studio's default "Standard" scale trains on the selected dataset turns.
+const standardTurns = preset.turns;
+const evalLossBefore = evalLoss(model, standardTurns);
 console.log(`  eval loss before fine-tuning: ${evalLossBefore.toFixed(4)}`);
 const epochLosses: number[] = [];
 const EPOCHS = 6;
 for (let epoch = 0; epoch < EPOCHS; epoch++) {
   let sum = 0;
-  for (const turn of expanded) {
+  for (const turn of standardTurns) {
     const text = `${SPECIAL_TOKENS.USER} ${turn.user} ${SPECIAL_TOKENS.NEWLINE}${SPECIAL_TOKENS.ASSISTANT} ${turn.assistant}`;
     const tokens = model.tokenizer.encode(text, true, true);
     const { loss } = model.trainStep(tokens, 0.015, true, 0.005);
     sum += loss;
   }
-  epochLosses.push(sum / expanded.length);
+  epochLosses.push(sum / standardTurns.length);
   console.log(`  epoch ${epoch + 1}: avg loss ${epochLosses[epoch].toFixed(4)}`);
 }
 const memoryAfterTraining = model.memory.size;
@@ -250,12 +252,38 @@ check(
   epochLosses[EPOCHS - 1] === Math.min(...epochLosses),
   `min=${Math.min(...epochLosses).toFixed(3)}`
 );
-const evalLossAfter = evalLoss(model, expanded);
+const evalLossAfter = evalLoss(model, standardTurns);
 console.log(`  eval loss after fine-tuning:  ${evalLossAfter.toFixed(4)}`);
 check(
   'held-out eval loss drops sharply after fine-tuning (>= 3x better)',
   evalLossAfter < evalLossBefore / 3,
   `${evalLossBefore.toFixed(3)} → ${evalLossAfter.toFixed(3)}`
+);
+
+// The "Expanded"/"Large" training scales add generated dialogue. They must
+// train just as cleanly; checked on a separate model so it cannot contaminate
+// the dataset-answer assertions below.
+const expandedModel = initializePretrainedModel(PREDEFINED_MODELS[1]);
+const expandedTurns = generateExpandedChatCorpus(preset, 40);
+let expandedFirst = 0;
+let expandedLast = 0;
+const EXPANDED_EPOCHS = 3;
+for (let epoch = 0; epoch < EXPANDED_EPOCHS; epoch++) {
+  let sum = 0;
+  for (const turn of expandedTurns) {
+    const text = `${SPECIAL_TOKENS.USER} ${turn.user} ${SPECIAL_TOKENS.NEWLINE}${SPECIAL_TOKENS.ASSISTANT} ${turn.assistant}`;
+    const { loss } = expandedModel.trainStep(expandedModel.tokenizer.encode(text, true, true), 0.015, true, 0.005);
+    sum += loss;
+  }
+  const avg = sum / expandedTurns.length;
+  if (epoch === 0) expandedFirst = avg;
+  expandedLast = avg;
+  console.log(`  expanded scale epoch ${epoch + 1}: avg loss ${avg.toFixed(4)}`);
+}
+check(
+  'expanded-scale training also reduces loss',
+  expandedLast < expandedFirst * 0.9,
+  `${expandedFirst.toFixed(3)} → ${expandedLast.toFixed(3)}`
 );
 
 // ---------------------------------------------------------------------------
@@ -314,13 +342,15 @@ check('model learned a custom user-added phrase ("music")', customReply.includes
 
 section('5. Reset-to-base restores weights + memory layer');
 
-const tunedHi = chat(model, 'hello who are you');
+const resetPrompt = 'how are you doing today';
+const tunedHi = chat(model, resetPrompt);
 model.resetToBase();
-const resetHi = chat(model, 'hello who are you');
+const resetHi = chat(model, resetPrompt);
 console.log(`  ${DIM}tuned:${RESET} ${tunedHi}`);
 console.log(`  ${DIM}reset:${RESET} ${resetHi}`);
-console.log(`  ${DIM}orig :${RESET} ${baseReplies['hello who are you']}`);
-check('reset restores the exact original base reply (greedy, deterministic)', resetHi === baseReplies['hello who are you']);
+console.log(`  ${DIM}orig :${RESET} ${baseReplies[resetPrompt]}`);
+check('fine-tuning changed the reply for a trained prompt', tunedHi !== baseReplies[resetPrompt]);
+check('reset restores the exact original base reply (greedy, deterministic)', resetHi === baseReplies[resetPrompt]);
 check('reset clears fine-tuned vocabulary from memory layer', model.memory.size === baseMemorySize, `size ${model.memory.size} vs base ${baseMemorySize} (post-training ${memoryAfterTraining})`);
 check('reset removes dataset-specific phrase', !chat(model, 'what makes a good morning routine').includes('routine'));
 

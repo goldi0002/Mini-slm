@@ -8,6 +8,36 @@ import { defaultTokenizer, SPECIAL_TOKENS } from './tokenizer';
 import { SmallLanguageModel } from './transformer';
 import { PREDEFINED_DATASETS, generateExpandedChatCorpus } from './datasets';
 
+/**
+ * Teach the shared tokenizer the vocabulary of every built-in corpus and
+ * dataset BEFORE any model is constructed. Words that are not in the base
+ * vocabulary would otherwise be reduced to single-character fallback tokens,
+ * which generation suppresses — making them impossible to ever produce.
+ * Runs once per process (guarded by a module-level flag).
+ *
+ * This MUST run before PREDEFINED_MODELS is evaluated: each config captures
+ * `defaultTokenizer.vocabSize`, and if the tokenizer grows afterwards the
+ * models would be built with a vocab smaller than the token ids they see
+ * (out-of-range probabilities → NaN loss and empty replies).
+ */
+let vocabularyExpanded = false;
+function ensureVocabulary(): void {
+  if (vocabularyExpanded) return;
+  vocabularyExpanded = true;
+  const corpusTexts = [
+    ...SmallLanguageModel.BASE_CORPUS,
+    ...PREDEFINED_DATASETS.flatMap((d) => d.turns.flatMap((t) => [t.user, t.assistant])),
+    ...PREDEFINED_DATASETS.flatMap((d) =>
+      generateExpandedChatCorpus(d, 100).flatMap((t) => [t.user, t.assistant])
+    ),
+  ];
+  defaultTokenizer.learnWords(corpusTexts);
+}
+
+// Expand the vocabulary at module load, before PREDEFINED_MODELS captures
+// defaultTokenizer.vocabSize into the model configurations.
+ensureVocabulary();
+
 export const PREDEFINED_MODELS: ModelConfig[] = [
   {
     id: 'assistant-48',
@@ -49,31 +79,6 @@ export const PREDEFINED_MODELS: ModelConfig[] = [
     loraAlpha: 16,
   }
 ];
-
-/**
- * Teach the shared tokenizer the vocabulary of every built-in corpus and
- * dataset BEFORE any model is constructed. Words that are not in the base
- * vocabulary would otherwise be reduced to single-character fallback tokens,
- * which generation suppresses — making them impossible to ever produce.
- * Runs once per process (guarded by a module-level flag).
- */
-let vocabularyExpanded = false;
-function ensureVocabulary(): void {
-  if (vocabularyExpanded) return;
-  vocabularyExpanded = true;
-  const corpusTexts = [
-    ...SmallLanguageModel.BASE_CORPUS,
-    ...PREDEFINED_DATASETS.flatMap((d) => d.turns.flatMap((t) => [t.user, t.assistant])),
-    ...PREDEFINED_DATASETS.flatMap((d) =>
-      generateExpandedChatCorpus(d, 100).flatMap((t) => [t.user, t.assistant])
-    ),
-  ];
-  defaultTokenizer.learnWords(corpusTexts);
-}
-
-// Expand the vocabulary at module load, before PREDEFINED_MODELS captures
-// defaultTokenizer.vocabSize into the model configurations.
-ensureVocabulary();
 
 /**
  * Pre-seeds baseline conversational knowledge into the model so it behaves

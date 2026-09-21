@@ -46,7 +46,10 @@ const CONVERSATIONAL_VOCAB = [
   'hello', 'hi', 'hey', 'greetings', 'welcome', 'morning', 'afternoon', 'evening', 'night', 'goodbye', 'bye',
 
   // Pronouns & Articles
-  'i', 'you', 'he', 'she', 'it', 'we', 'they', 'me', 'him', 'her', 'us', 'them',
+  // Capital "I" is a real word token: it opens most assistant replies, and if it
+  // fell through to the single-character OOV alphabet it would be suppressed
+  // during generation (making "I am ..." impossible to produce).
+  'I', 'i', 'you', 'he', 'she', 'it', 'we', 'they', 'me', 'him', 'her', 'us', 'them',
   'my', 'your', 'his', 'its', 'our', 'their', 'mine', 'yours',
   'a', 'an', 'the', 'this', 'that', 'these', 'those',
 
@@ -126,6 +129,10 @@ export class Tokenizer {
     }
     for (let c = 65; c <= 90; c++) {
       const char = String.fromCharCode(c);
+      // Never create an uppercase fallback for a letter that already exists as a
+      // lowercase word ("A" -> 'a', "I" -> 'I'): the uppercase entry would
+      // shadow the real word and then be suppressed during generation.
+      if (this.tokenToId.has(char.toLowerCase())) continue;
       if (!seen.has(char)) {
         seen.add(char);
         this.tokenToId.set(char, id);
@@ -274,6 +281,11 @@ export class Tokenizer {
 
   public getTokenString(id: number): string {
     return this.idToToken.get(id) ?? `<id:${id}>`;
+  }
+
+  /** Look up the id of an exact token string, or undefined when unknown. */
+  public idOf(token: string): number | undefined {
+    return this.tokenToId.get(token);
   }
 
   public formatConversationPrompt(userMessage: string, history: Array<{ role: string; content: string }> = []): string {

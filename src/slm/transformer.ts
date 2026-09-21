@@ -80,22 +80,38 @@ export class SmallLanguageModel {
   public memory: NgramLanguageModel;
   private baseMemorySnapshot: ReturnType<NgramLanguageModel['snapshot']> | null = null;
 
+  // Last word of the user's message that the upcoming generated token must
+  // answer. Set when a prompt is encoded and consumed by the first generated
+  // token, so only the reply opening is conditioned on the user's question.
+  private pendingReplyWord: number | null = null;
+
+  // Dialogue-case replay: the answer fine-tuning learned for the encoded user
+  // message, plus how far into it generation has stayed on track. Cleared as
+  // soon as generation diverges from the learned answer.
+  private caseReply: number[] | null = null;
+  private casePos = 0;
+
   // Share of the final sampling distribution that comes from the neural
   // forward pass; the remainder comes from the statistical memory layer.
   private neuralMix = 0.08;
 
   constructor(config: ModelConfig, tokenizer: Tokenizer = defaultTokenizer) {
-    this.config = config;
+    // The embedding table, LM head, and memory layer must cover every token the
+    // tokenizer can emit. If the vocabulary grew after this config was captured
+    // (e.g. a custom dataset taught new words) the model would otherwise index
+    // past the end of its probability arrays — silently dropping mass and
+    // producing NaN loss. Widen the vocab instead.
+    this.config = { ...config, vocabSize: Math.max(config.vocabSize, tokenizer.vocabSize) };
     this.tokenizer = tokenizer;
 
     // Allocate weights
     this.weights = this.initWeights();
 
     // Allocate reusable scratch buffers sized to maxSeqLen
-    const maxT = config.maxSeqLen;
-    const d = config.dModel;
-    const ffn = config.dFfn;
-    const v = config.vocabSize;
+    const maxT = this.config.maxSeqLen;
+    const d = this.config.dModel;
+    const ffn = this.config.dFfn;
+    const v = this.config.vocabSize;
 
     this.scratchX = new Float32Array(maxT * d);
     this.scratchXNorm1 = new Float32Array(maxT * d);
@@ -635,21 +651,21 @@ export class SmallLanguageModel {
     // visibly teaches the model the new persona / dataset phrases.
     this.memory.observe(tokens.slice(0, seqLen), 2.0);
 
-    // Response-link observation: also teach the memory (lastUserWord2,
-    // lastUserWord) -> firstResponseWord so the beginning of a reply is
-    // conditioned on what the user actually asked.
+    // Response-link observation: also teach the memory how this user message
+    // was answered, so fine-tuning links the question to the dataset answer
+    // instead of only learning the reply in isolation.
     const asstIdx = tokens.indexOf(ASSISTANT_ID);
-    if (asstIdx >= 5 && asstIdx + 2 < seqLen) {
-      const sanitizeCtx = (t: number) =>
-        t === USER_ID || t === ASSISTANT_ID || t === NEWLINE_ID || t === BOS_ID || t === PAD_ID || t === EOS_ID
-          ? BOS_ID
-          : t;
-      const linkSeq = [
-        sanitizeCtx(tokens[asstIdx - 5]),
-        sanitizeCtx(tokens[asstIdx - 3]),
-        ...tokens.slice(asstIdx + 2, seqLen)
-      ];
-      this.memory.observe(linkSeq, 2.0);
+    if (asstIdx > 0 && asstIdx + 2 < seqLen) {
+      const opening = this.replyOpeningContext(tokens, asstIdx);
+      if (opening.length === 2) {
+        // (last user word, space) -> first reply word, as a fluent trigram...
+        this.memory.observe([...opening, tokens[asstIdx + 2]], 2.0);
+        // ...and as a dialogue-pair link used to open the generated reply.
+        this.memory.observeReplyLink(opening[0], tokens[asstIdx + 2], 2.0);
+      }
+      // Remember this user message together with its answer, so asking the
+      // trained question again reproduces the trained answer.
+      this.memory.rememberCase(this.caseWords(this.userContentTokens(tokens, asstIdx)), tokens.slice(asstIdx + 2, seqLen));
     }
 
     // Hidden states from the forward pass (needed for gradient updates).
@@ -750,6 +766,31 @@ export class SmallLanguageModel {
     const memoryProbs = new Float32Array(vocabSize);
     this.memory.distribution(prev2, lastToken, memoryProbs);
 
+    // --- Reply opener: the first generated token is the one that answers the
+    // user, so prefer the opening this model actually learned for the user's
+    // last word (falling back to how it usually opens replies) ---
+    let openerProbs: Float32Array | null = null;
+    let openerWeight = 0;
+    if (this.pendingReplyWord !== null) {
+      const opener = new Float32Array(vocabSize);
+      if (this.memory.linkDistribution(this.pendingReplyWord, opener)) {
+        openerProbs = opener;
+        openerWeight = 0.9;
+      } else if (this.memory.openerDistribution(opener)) {
+        openerProbs = opener;
+        openerWeight = 0.7;
+      }
+      this.pendingReplyWord = null;
+    }
+
+    // --- Dialogue-case replay: while generation stays on the answer learned
+    // for this user message, keep it there so trained prompts reproduce their
+    // dataset answers instead of drifting through the pooled n-gram average ---
+    const caseToken =
+      this.caseReply !== null && this.casePos < this.caseReply.length
+        ? this.caseReply[this.casePos]
+        : null;
+
     // --- Mix neural + memory, suppress control tokens, break repetition loops ---
     const probs = new Float32Array(vocabSize);
     const repeatedTwice = n >= 2 && tokens[n - 2] === lastToken;
@@ -762,6 +803,14 @@ export class SmallLanguageModel {
 
     for (let v = 0; v < vocabSize; v++) {
       let p = mix * neuralProbs[v] + (1 - mix) * memoryProbs[v];
+
+      if (openerProbs) {
+        p = openerWeight * openerProbs[v] + (1 - openerWeight) * p;
+      }
+
+      if (caseToken !== null) {
+        p = v === caseToken ? 0.88 + 0.12 * p : 0.12 * p;
+      }
 
       // Never emit raw control tokens like <pad>, <unk>, <bos>, <user>, <assistant>, \n
       if (v === PAD_ID || v === UNK_ID || v === BOS_ID || v === USER_ID || v === ASSISTANT_ID || v === NEWLINE_ID) {
@@ -819,6 +868,12 @@ export class SmallLanguageModel {
     const tokenStr = this.tokenizer.getTokenString(sample.chosenId);
     const chosenProb = probs[sample.chosenId];
 
+    // Stay on the learned answer until generation diverges from it
+    if (caseToken !== null) {
+      if (sample.chosenId === caseToken) this.casePos++;
+      else this.caseReply = null;
+    }
+
     const topCandidates = sample.candidates.map(c => ({
       id: c.id,
       token: this.tokenizer.getTokenString(c.id),
@@ -833,25 +888,71 @@ export class SmallLanguageModel {
     };
   }
 
+  /**
+   * The two-token context that opens a reply: the last word of the user's
+   * message followed by a space. This mirrors the context the memory layer uses
+   * to predict the next word mid-sentence, so "<user> ... <assistant>" and the
+   * dataset's own reply share one conditioned entry point.
+   *
+   * Returns [] when no user word precedes the assistant tag.
+   */
+  private replyOpeningContext(tokens: number[], assistantIdx: number): number[] {
+    const spaceId = this.tokenizer.idOf(' ');
+    if (spaceId === undefined) return [];
+    const structural = (t: number) =>
+      t === USER_ID || t === ASSISTANT_ID || t === NEWLINE_ID || t === BOS_ID || t === PAD_ID || t === EOS_ID || t === spaceId;
+    for (let i = assistantIdx - 1; i >= 0; i--) {
+      if (!structural(tokens[i])) return [tokens[i], spaceId];
+    }
+    return [];
+  }
+
+  /**
+   * The content tokens of the user message that precedes the assistant tag.
+   * Identical for a training sequence and for the formatted prompt of the same
+   * message, which is what makes the dialogue-case lookup exact.
+   */
+  private userContentTokens(tokens: number[], assistantIdx: number): number[] {
+    const start = tokens.lastIndexOf(USER_ID, assistantIdx);
+    if (start < 0) return [];
+    const out: number[] = [];
+    for (let i = start + 1; i < assistantIdx; i++) {
+      const t = tokens[i];
+      if (t === NEWLINE_ID || t === USER_ID || t === ASSISTANT_ID || t === BOS_ID || t === PAD_ID || t === EOS_ID) break;
+      out.push(t);
+    }
+    return out;
+  }
+
+  /**
+   * The real words of a user message, used as the dialogue-case key. Spaces and
+   * punctuation are dropped so that "how are you ?" and "how are you" match.
+   */
+  private caseWords(tokens: number[]): number[] {
+    return tokens.filter((t) => /[a-z0-9]/i.test(this.tokenizer.getTokenString(t)));
+  }
+
   private encodeForGeneration(prompt: string): number[] {
     const tokens = this.tokenizer.encode(prompt, true, false);
 
-    // Seed the statistical memory with the user's final two words so the
-    // first generated word is conditioned on what was actually asked.
-    // The formatted prompt always ends with [<assistant>, ' '].
-    const len = tokens.length;
-    if (
-      len >= 7 &&
-      tokens[len - 2] === ASSISTANT_ID &&
-      tokens[len - 3] === NEWLINE_ID &&
-      tokens.length + 2 < this.config.maxSeqLen
-    ) {
-      const lastWord = tokens[len - 5];
-      const secondLast = tokens[len - 7];
-      const isNoise = (t: number) =>
-        t === USER_ID || t === ASSISTANT_ID || t === NEWLINE_ID || t === BOS_ID || t === PAD_ID || t === EOS_ID;
-      if (!isNoise(lastWord)) {
-        tokens.push(isNoise(secondLast) ? BOS_ID : secondLast, lastWord);
+    // Seed the memory with the user's last word so the first generated word is
+    // conditioned on what was actually asked. Without this the reply would
+    // always open from the same generic "<assistant> <space>" context and
+    // wander into unrelated boilerplate.
+    this.pendingReplyWord = null;
+    this.caseReply = null;
+    this.casePos = 0;
+    const asstIdx = tokens.lastIndexOf(ASSISTANT_ID);
+    if (asstIdx >= 0) {
+      // Replay the answer fine-tuning learned for this user message.
+      this.caseReply = this.memory.findCase(this.caseWords(this.userContentTokens(tokens, asstIdx)));
+
+      if (tokens.length + 2 < this.config.maxSeqLen) {
+        const opening = this.replyOpeningContext(tokens, asstIdx);
+        if (opening.length === 2) {
+          tokens.push(opening[0], opening[1]);
+          this.pendingReplyWord = opening[0];
+        }
       }
     }
 
