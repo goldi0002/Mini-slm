@@ -13,6 +13,7 @@
  *      trained dataset, base replies do not), and user-added turns are learned.
  *   5. resetToBase() restores exact base behavior (weights + memory layer).
  *   6. Streaming API yields valid token info.
+ *  10. Multi-turn chat keeps replying when history fills the context window.
  *
  * Run: bun scripts/diag_script.ts
  */
@@ -20,9 +21,26 @@
 import { PREDEFINED_MODELS, initializePretrainedModel } from '../src/slm/predefinedModels';
 import { PREDEFINED_DATASETS, generateExpandedChatCorpus } from '../src/slm/datasets';
 import { defaultTokenizer, SPECIAL_TOKENS, UNK_ID, BOS_ID } from '../src/slm/tokenizer';
-import { SmallLanguageModel } from '../src/slm/transformer';
+import { SmallLanguageModel, MIN_REPLY_TOKENS } from '../src/slm/transformer';
 import { softmax } from '../src/slm/matrix';
 import { GenerationOptions } from '../src/types';
+
+// ---------------------------------------------------------------------------
+// Reproducibility
+// ---------------------------------------------------------------------------
+// Evaluation has to be reproducible, so pin the RNG: it drives both weight
+// initialisation and sampled decoding. The decoding configuration is the GREEDY
+// and SAMPLED option objects below.
+
+const RANDOM_SEED = 20240921;
+let rngState = RANDOM_SEED;
+Math.random = (): number => {
+  rngState |= 0;
+  rngState = (rngState + 0x6d2b79f5) | 0;
+  let t = Math.imul(rngState ^ (rngState >>> 15), 1 | rngState);
+  t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+  return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -99,12 +117,13 @@ const GREEDY: GenerationOptions = {
   maxNewTokens: 30,
 };
 
+// Mirrors the chat playground's default sampling settings.
 const SAMPLED: GenerationOptions = {
   temperature: 0.7,
   topK: 25,
   topP: 0.85,
   repetitionPenalty: 1.15,
-  maxNewTokens: 26,
+  maxNewTokens: 40,
 };
 
 function chat(model: SmallLanguageModel, user: string, opts: GenerationOptions = GREEDY): string {
@@ -226,6 +245,8 @@ section('3. Fine-tuning loss reduction (LoRA, the dataset the studio trains on)'
 
 // The studio's default "Standard" scale trains on the selected dataset turns.
 const standardTurns = preset.turns;
+// NOTE: this is in-sample loss - these are the same turns training has just
+// seen. The genuine held-out measurement is section 8.
 const evalLossBefore = evalLoss(model, standardTurns);
 console.log(`  eval loss before fine-tuning: ${evalLossBefore.toFixed(4)}`);
 const epochLosses: number[] = [];
@@ -255,7 +276,7 @@ check(
 const evalLossAfter = evalLoss(model, standardTurns);
 console.log(`  eval loss after fine-tuning:  ${evalLossAfter.toFixed(4)}`);
 check(
-  'held-out eval loss drops sharply after fine-tuning (>= 3x better)',
+  'the turns it trained on are fitted (in-sample loss >= 3x better)',
   evalLossAfter < evalLossBefore / 3,
   `${evalLossBefore.toFixed(3)} → ${evalLossAfter.toFixed(3)}`
 );
@@ -378,6 +399,403 @@ check('generateStream yields valid token infos', streamOk && streamTokens.length
 const sampledReply = chat(model, 'thank you so much for chatting with me !', SAMPLED);
 console.log(`  ${DIM}SAMPLED:${RESET} ${sampledReply}`);
 check('sampled generation stays clean (no specials / spelled chars)', textIssues(sampledReply).length === 0);
+
+// ---------------------------------------------------------------------------
+// 7. Replies are complete: no one-token stubs, no clauses cut in half
+// ---------------------------------------------------------------------------
+// The memory layer ranks EOS highly right after a sentence-ending period, so
+// unguarded sampling used to end some replies after a single token, producing a
+// bare "." or one-word answer. Generation holds EOS back for the first
+// MIN_REPLY_TOKENS tokens to prevent that.
+//
+// The opposite failure is what the stop rule in the memory layer fixes: a reply
+// that rambles past the sentence it completed and is then cut mid-clause by the
+// token budget. Both are measured here.
+
+section('7. Sampled replies are complete (not stubs, not cut mid-clause)');
+
+const stubPrompts = [
+  'hello how are you doing today ?',
+  'who are you and how can you help me ?',
+  'I feel overwhelmed with my daily tasks',
+  'can you give me advice on staying focused ?',
+  'what makes a good morning routine ?',
+  'thank you so much for chatting with me !',
+];
+
+let stubCount = 0;
+let minReplyWords = Infinity;
+let minReplyTokens = Infinity;
+let shortestStub = '';
+let unfinishedReplies = 0;
+let shortestUnfinished = '';
+const sampledReplies = stubPrompts.length * 6;
+for (const p of stubPrompts) {
+  for (let i = 0; i < 6; i++) {
+    const out = model.generate(model.tokenizer.formatConversationPrompt(p), SAMPLED, true);
+    const wordCount = words(out.text).length;
+    minReplyWords = Math.min(minReplyWords, wordCount);
+    minReplyTokens = Math.min(minReplyTokens, out.tokens.length);
+    if (wordCount < 3) {
+      stubCount++;
+      shortestStub = out.text;
+    }
+    if (!/[.!?]$/.test(out.text.trim())) {
+      unfinishedReplies++;
+      shortestUnfinished = out.text;
+    }
+  }
+}
+if (shortestStub) {
+  console.log(`  ${YELLOW}shortest stub:${RESET} ${JSON.stringify(shortestStub)}`);
+}
+if (shortestUnfinished) {
+  console.log(`  ${YELLOW}no final punctuation:${RESET} ${JSON.stringify(shortestUnfinished)}`);
+}
+console.log(
+  `  ${sampledReplies} sampled replies | shortest: ${minReplyWords} words / ${minReplyTokens} tokens | ${sampledReplies - unfinishedReplies} finish on a sentence boundary`
+);
+check(
+  'no sampled reply collapses to a one-word answer',
+  minReplyWords >= 2,
+  `shortest reply ${minReplyWords} words`
+);
+check(
+  'every reply runs past the EOS hold-back window before it can end',
+  minReplyTokens >= MIN_REPLY_TOKENS,
+  `shortest reply ${minReplyTokens} tokens (hold-back ${MIN_REPLY_TOKENS})`
+);
+check(
+  'replies finish on a sentence boundary rather than being cut mid-clause',
+  unfinishedReplies <= Math.ceil(sampledReplies * 0.15),
+  `${unfinishedReplies}/${sampledReplies} replies without final punctuation`
+);
+
+// ---------------------------------------------------------------------------
+// 8. Held-out generalisation (train / validation split)
+// ---------------------------------------------------------------------------
+// Section 3 trains and evaluates on the same turns, so its falling loss shows
+// only that the model fits its training data. This section holds turns out of
+// training entirely and measures the gap, which is what an "eval loss" claim
+// actually needs to mean.
+
+section('8. Held-out generalisation (train / validation split)');
+
+const valIndices = [5, 6, 7];
+const splitTrainTurns = preset.turns.filter((_, i) => !valIndices.includes(i));
+const splitHeldOutTurns = preset.turns.filter((_, i) => valIndices.includes(i));
+const otherDomainTurns = PREDEFINED_DATASETS[1].turns;
+
+const splitModel = initializePretrainedModel(PREDEFINED_MODELS[1]);
+const lossBefore = {
+  inSample: evalLoss(splitModel, splitTrainTurns),
+  heldOut: evalLoss(splitModel, splitHeldOutTurns),
+  otherDomain: evalLoss(splitModel, otherDomainTurns),
+};
+
+const SPLIT_EPOCHS = 6;
+for (let epoch = 0; epoch < SPLIT_EPOCHS; epoch++) {
+  for (const turn of splitTrainTurns) {
+    const text = `${SPECIAL_TOKENS.USER} ${turn.user} ${SPECIAL_TOKENS.NEWLINE}${SPECIAL_TOKENS.ASSISTANT} ${turn.assistant}`;
+    splitModel.trainStep(splitModel.tokenizer.encode(text, true, true), 0.015, true, 0.005);
+  }
+}
+
+const lossAfter = {
+  inSample: evalLoss(splitModel, splitTrainTurns),
+  heldOut: evalLoss(splitModel, splitHeldOutTurns),
+  otherDomain: evalLoss(splitModel, otherDomainTurns),
+};
+const generalisationGap = lossAfter.heldOut - lossAfter.inSample;
+
+console.log(
+  `  split: ${splitTrainTurns.length} train / ${splitHeldOutTurns.length} held-out / ${otherDomainTurns.length} other-domain`
+);
+console.log(`  in-sample    ${lossBefore.inSample.toFixed(3)} -> ${lossAfter.inSample.toFixed(3)}`);
+console.log(`  held-out     ${lossBefore.heldOut.toFixed(3)} -> ${lossAfter.heldOut.toFixed(3)}`);
+console.log(`  other-domain ${lossBefore.otherDomain.toFixed(3)} -> ${lossAfter.otherDomain.toFixed(3)}`);
+console.log(`  generalisation gap after fine-tuning: ${generalisationGap.toFixed(3)} nats`);
+console.log(
+  `  ${DIM}read this as: fine-tuning fits the turns it saw; it does not improve loss on\n  unseen ones, so answer quality for trained prompts comes from dialogue-case\n  replay in the memory layer, not from generalisation.${RESET}`
+);
+
+check(
+  'fine-tuning fits its own training turns (in-sample loss at least halves)',
+  lossAfter.inSample < lossBefore.inSample / 2,
+  `${lossBefore.inSample.toFixed(3)} -> ${lossAfter.inSample.toFixed(3)}`
+);
+check(
+  'held-out turns do not regress beyond a small tolerance',
+  lossAfter.heldOut <= lossBefore.heldOut * 1.05,
+  `${lossBefore.heldOut.toFixed(3)} -> ${lossAfter.heldOut.toFixed(3)}`
+);
+check(
+  'the generalisation gap is measured rather than assumed away',
+  generalisationGap > 0,
+  `${generalisationGap.toFixed(3)} nats, reported above`
+);
+
+// ---------------------------------------------------------------------------
+// 9. LoRA adapter gradients (finite differences)
+// ---------------------------------------------------------------------------
+// The adapter update used to be a hand-rolled heuristic: a single `lora_v_B`
+// row, picked by `targetToken % dModel`, nudged by the loss gradient. Nothing
+// tied that row to the loss, and `lora_q_A`/`lora_q_B` were never updated at
+// all. Training now differentiates the cross-entropy for real, and this section
+// is the guard on it: the analytic gradient must match a numerical one, or
+// "fine-tuning" has quietly gone back to guessing.
+
+section('9. Adapter gradients match numerical differentiation');
+
+/** Mean cross-entropy of the neural distribution alone (no memory blend). */
+function neuralLoss(model: SmallLanguageModel, tokens: number[]): number {
+  const V = model.config.vocabSize;
+  const probs = new Float32Array(V);
+  const { logits, seqLen } = model.forward(tokens, true);
+  let total = 0;
+  let count = 0;
+  for (let i = 0; i < seqLen - 1; i++) {
+    const target = tokens[i + 1];
+    if (target === 0) continue; // PAD
+    const row = logits.subarray(i * V, (i + 1) * V);
+    softmax(row, probs, 1.0);
+    total += -Math.log(Math.max(1e-8, probs[target]));
+    count++;
+  }
+  return count > 0 ? total / count : 0;
+}
+
+const gradModel = initializePretrainedModel(PREDEFINED_MODELS[0]);
+const gradTokens = gradModel.tokenizer.encode(
+  `${SPECIAL_TOKENS.USER} how are you feeling today ? ${SPECIAL_TOKENS.NEWLINE}` +
+    `${SPECIAL_TOKENS.ASSISTANT} I am doing well , thank you for asking .`,
+  true,
+  true
+);
+
+// Sample adapter weights from every adapter matrix of every layer.
+const gradSlots: Array<{ name: string; arr: Float32Array; idx: number }> = [];
+for (let l = 0; l < gradModel.weights.layers.length; l++) {
+  for (const key of ['lora_q_A', 'lora_q_B', 'lora_v_A', 'lora_v_B'] as const) {
+    const arr = gradModel.weights.layers[l][key];
+    for (const idx of [0, Math.floor(arr.length / 2)]) {
+      gradSlots.push({ name: `layer${l}.${key}[${idx}]`, arr, idx });
+    }
+  }
+}
+
+const gradLoss = neuralLoss(gradModel, gradTokens);
+const FD_EPS = 0.01;
+// The forward pass is float32, so the loss is quantised at roughly loss * 2^-23
+// and a central difference divides that granularity by 2*eps. Below this, a
+// difference is unmeasurable rather than wrong.
+const fdNoiseFloor = (gradLoss * Math.pow(2, -23)) / (2 * FD_EPS);
+const numericGrad: number[] = [];
+for (const slot of gradSlots) {
+  const w = slot.arr[slot.idx];
+  slot.arr[slot.idx] = w + FD_EPS;
+  const up = neuralLoss(gradModel, gradTokens);
+  slot.arr[slot.idx] = w - FD_EPS;
+  const down = neuralLoss(gradModel, gradTokens);
+  slot.arr[slot.idx] = w;
+  numericGrad.push((up - down) / (2 * FD_EPS));
+}
+
+// Snapshot the frozen base weights, then run one lr=1 step: with no weight
+// decay that applies exactly -gradient to every adapter.
+const frozenProbes = [
+  gradModel.weights.wte,
+  gradModel.weights.lm_head,
+  gradModel.weights.layers[0].q_proj,
+  gradModel.weights.layers[0].fc1,
+  gradModel.weights.ln_f_gamma
+];
+const frozenCopies = frozenProbes.map((w) => w.slice(0, 64));
+
+const gradBefore = gradSlots.map((s) => s.arr[s.idx]);
+gradModel.trainStep(gradTokens, 1.0, true, 0.0);
+const analyticGrad = gradSlots.map((s, i) => gradBefore[i] - s.arr[s.idx]);
+
+let gradWorstAbs = 0;
+let gradWorstName = '';
+let gradResolvable = 0;
+let gradSignMismatches = 0;
+for (let i = 0; i < gradSlots.length; i++) {
+  const absErr = Math.abs(analyticGrad[i] - numericGrad[i]);
+  if (absErr > gradWorstAbs) {
+    gradWorstAbs = absErr;
+    gradWorstName = gradSlots[i].name;
+  }
+  if (numericGrad[i] !== 0 && Math.sign(analyticGrad[i]) !== Math.sign(numericGrad[i])) {
+    gradSignMismatches++;
+  }
+  if (Math.abs(numericGrad[i]) > 10 * fdNoiseFloor) gradResolvable++;
+}
+console.log(
+  `  ${gradSlots.length} sampled adapter weights (${gradResolvable} resolvable above the float32 noise floor)`
+);
+console.log(
+  `  worst absolute error ${gradWorstAbs.toExponential(2)} (${gradWorstName}), noise floor ${fdNoiseFloor.toExponential(2)}`
+);
+check(
+  'analytic LoRA gradient matches numerical differentiation',
+  gradWorstAbs < 5 * fdNoiseFloor,
+  `worst ${gradWorstAbs.toExponential(2)} vs floor ${fdNoiseFloor.toExponential(2)}`
+);
+check(
+  'analytic gradient points the same way as the numerical one',
+  gradSignMismatches === 0,
+  `${gradSignMismatches} sign mismatches out of ${gradSlots.length}`
+);
+
+// LoRA only trains the adapters, so the pretrained network must be untouched
+// even after an aggressive lr=1 step.
+const baseStillFrozen = frozenProbes.every((w, i) => {
+  for (let j = 0; j < frozenCopies[i].length; j++) {
+    if (w[j] !== frozenCopies[i][j]) return false;
+  }
+  return true;
+});
+check('LoRA training leaves every base weight untouched', baseStillFrozen);
+
+// And the gradient has to be useful: the adapters must measurably fit the
+// sequence they were trained on. This is the check that would have caught the
+// old heuristic, which moved weights without tracking the loss.
+const loraFitModel = initializePretrainedModel(PREDEFINED_MODELS[0]);
+const loraFitTurns = preset.turns.slice(0, 3).map((t) =>
+  loraFitModel.tokenizer.encode(
+    `${SPECIAL_TOKENS.USER} ${t.user} ${SPECIAL_TOKENS.NEWLINE}${SPECIAL_TOKENS.ASSISTANT} ${t.assistant}`,
+    true,
+    true
+  )
+);
+const loraFitBefore =
+  loraFitTurns.reduce((sum, tokens) => sum + neuralLoss(loraFitModel, tokens), 0) / loraFitTurns.length;
+
+// Snapshot the adapters so the check below is "these weights changed", not
+// "these weights are non-zero" — the A matrices are randomly initialised, so a
+// mere non-zero test would pass on a trainer that never touches them.
+const adapterSnapshot = loraFitModel.weights.layers.map((layer) =>
+  (['lora_q_A', 'lora_q_B', 'lora_v_A', 'lora_v_B'] as const).map((key) => layer[key].slice())
+);
+
+for (let epoch = 0; epoch < 6; epoch++) {
+  for (const tokens of loraFitTurns) loraFitModel.trainStep(tokens, 0.05, true, 0.005);
+}
+
+const adapterKeys = ['lora_q_A', 'lora_q_B', 'lora_v_A', 'lora_v_B'] as const;
+let movedMatrices = 0;
+let totalMatrices = 0;
+for (let l = 0; l < loraFitModel.weights.layers.length; l++) {
+  for (let k = 0; k < adapterKeys.length; k++) {
+    totalMatrices++;
+    const after = loraFitModel.weights.layers[l][adapterKeys[k]];
+    const before = adapterSnapshot[l][k];
+    for (let i = 0; i < after.length; i++) {
+      if (after[i] !== before[i]) {
+        movedMatrices++;
+        break;
+      }
+    }
+  }
+}
+check(
+  'every layer updates all four adapter matrices',
+  movedMatrices === totalMatrices,
+  `${movedMatrices}/${totalMatrices} matrices changed`
+);
+const loraFitAfter =
+  loraFitTurns.reduce((sum, tokens) => sum + neuralLoss(loraFitModel, tokens), 0) / loraFitTurns.length;
+console.log(`  neural in-sample loss ${loraFitBefore.toFixed(3)} -> ${loraFitAfter.toFixed(3)} (adapters only)`);
+check(
+  'the adapters measurably fit the turns they are trained on',
+  loraFitAfter < loraFitBefore * 0.97,
+  `${loraFitBefore.toFixed(3)} -> ${loraFitAfter.toFixed(3)}`
+);
+
+// ---------------------------------------------------------------------------
+// 10. Multi-turn chat keeps replying (context window)
+// ---------------------------------------------------------------------------
+// The playground feeds conversation history back into the prompt. With a 64
+// token window the raw prompt passes maxSeqLen after a couple of turns, and the
+// generation loop exits before its first step — which is why the chat bubble
+// went blank from the third message on. `generateChatStream` windows the prompt
+// to the context (dropping whole oldest turns) and reserves room for the reply.
+
+section('10. Multi-turn chat keeps replying inside the context window');
+
+const chatModel = initializePretrainedModel(PREDEFINED_MODELS[0]);
+const MAX_SEQ = chatModel.config.maxSeqLen;
+const transcript: Array<{ role: 'user' | 'assistant'; content: string; tokens: number }> = [];
+const chatTurns = [
+  'hello there !',
+  'how are you today ?',
+  'what should i cook for dinner ?',
+  'thanks !',
+  'can you give me advice on staying focused ?',
+  'what makes a good morning routine ?',
+];
+
+let blankTurns = 0;
+let overLongPrompts = 0;
+let uncleanReplies = 0;
+let shortestReply = Infinity;
+
+for (const text of chatTurns) {
+  // History exactly as ChatPlayground builds it: earlier turns of the
+  // conversation, capped to the last few messages.
+  const history = transcript
+    .filter((t) => t.content.trim().length > 0)
+    .slice(-4)
+    .map((t) => ({ role: t.role, content: t.content }));
+  const prompt = chatModel.tokenizer.formatConversationPrompt(text, history);
+  const promptTokens = chatModel.tokenizer.encode(prompt, true, false).length;
+  if (promptTokens > MAX_SEQ) overLongPrompts++;
+
+  const replyTokens: number[] = [];
+  for await (const info of chatModel.generateChatStream(prompt, SAMPLED, true)) {
+    replyTokens.push(info.id);
+  }
+  const reply = chatModel.tokenizer.decode(replyTokens, true);
+  const issues = textIssues(reply);
+
+  transcript.push({ role: 'user', content: text, tokens: promptTokens });
+  transcript.push({ role: 'assistant', content: reply, tokens: replyTokens.length });
+
+  shortestReply = Math.min(shortestReply, replyTokens.length);
+  if (replyTokens.length === 0 || reply.trim().length === 0) blankTurns++;
+  if (issues.length > 0) uncleanReplies++;
+
+  console.log(`  ${DIM}USER:${RESET}  ${text}`);
+  console.log(
+    `  ${DIM}BOT :${RESET}  ${reply || '(empty!)'}${issues.length ? `  ${YELLOW}[${issues.join(', ')}]${RESET}` : ''}`
+  );
+  console.log(
+    `  ${DIM}prompt ${promptTokens} tokens (raw window ${MAX_SEQ}), reply ${replyTokens.length} tokens${RESET}`
+  );
+}
+
+console.log(`  raw prompts over the window: ${overLongPrompts}/${chatTurns.length}`);
+check(
+  'no chat turn comes back blank once history fills the context window',
+  blankTurns === 0,
+  `${blankTurns}/${chatTurns.length} blank, shortest reply ${shortestReply} tokens`
+);
+check(
+  'the conversation really does outgrow the raw context window',
+  overLongPrompts > 0,
+  `${overLongPrompts}/${chatTurns.length} raw prompts over maxSeqLen ${MAX_SEQ}`
+);
+check(
+  'windowed replies are substantive (never a one-token stub)',
+  shortestReply >= MIN_REPLY_TOKENS,
+  `shortest reply ${shortestReply} tokens (hold-back ${MIN_REPLY_TOKENS})`
+);
+check(
+  'windowed replies stay clean (no raw specials / spelled chars)',
+  uncleanReplies === 0,
+  `${uncleanReplies} unclean replies`
+);
 
 // ---------------------------------------------------------------------------
 // Summary

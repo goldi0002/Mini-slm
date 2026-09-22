@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { 
   Layers, 
   Cpu, 
@@ -35,15 +35,36 @@ export const ArchitectureInspector: React.FC<ArchitectureInspectorProps> = ({
   const [selectedHead, setSelectedHead] = useState(0);
   const [exportSuccess, setExportSuccess] = useState(false);
 
-  // Run forward pass on test prompt to populate attention maps
-  const tokens = model.tokenizer.encode(testPrompt, true, false);
-  model.forward(tokens, isFinetuned);
+  const tokens = useMemo(
+    () => model.tokenizer.encode(testPrompt, true, false),
+    [model, testPrompt]
+  );
 
-  const tokenLabels = tokens.map((id) => model.tokenizer.getTokenString(id));
+  const tokenLabels = useMemo(
+    () => tokens.map((id) => model.tokenizer.getTokenString(id)),
+    [model, tokens]
+  );
+
+  // A different model may have fewer layers or heads than the current
+  // selection, which would leave the heatmap showing an empty, masked grid.
+  useEffect(() => {
+    setSelectedLayer(0);
+    setSelectedHead(0);
+  }, [model]);
+
+  // The forward pass mutates the model's scratch buffers and attention maps, so
+  // it is a side effect: run it after render, keyed on its real inputs, instead
+  // of recomputing it during every render (including unrelated ones such as
+  // selecting a different layer or head).
+  const [attentionMaps, setAttentionMaps] = useState<number[][][][]>([]);
+
+  useEffect(() => {
+    model.forward(tokens, isFinetuned);
+    setAttentionMaps(model.lastAttentionMaps);
+  }, [model, tokens, isFinetuned]);
 
   // Retrieve attention map for current layer & head
-  const currentAttnMatrix =
-    model.lastAttentionMaps[selectedLayer]?.[selectedHead] || [];
+  const currentAttnMatrix = attentionMaps[selectedLayer]?.[selectedHead] || [];
 
   // Export weights as JSON file
   const handleExportWeights = () => {

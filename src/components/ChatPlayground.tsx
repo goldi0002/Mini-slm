@@ -22,16 +22,30 @@ import { ChatMessage, GenerationOptions, GeneratedTokenInfo } from '../types';
 import { SmallLanguageModel } from '../slm/transformer';
 import { TokenInspectorModal } from './TokenInspectorModal';
 
+/** Shown when a generation turn produced no tokens at all. */
+const EMPTY_REPLY_NOTICE =
+  'I could not produce a reply for that one — try rephrasing it, or fine-tune me on a dataset that covers it.';
+
+/** Never leave a blank assistant bubble: say so instead. */
+function finishReply<T extends ChatMessage>(list: T[], id: string): T[] {
+  return list.map((m) =>
+    m.id === id && m.content.trim() === '' ? { ...m, content: EMPTY_REPLY_NOTICE } : m
+  );
+}
+
 interface ChatPlaygroundProps {
   model: SmallLanguageModel;
   isFinetuned: boolean;
   activeDatasetName?: string;
+  /** Builds a fresh, never-fine-tuned model used by the comparison view. */
+  createBaseModel: () => SmallLanguageModel;
 }
 
 export const ChatPlayground: React.FC<ChatPlaygroundProps> = ({
   model,
   isFinetuned,
   activeDatasetName,
+  createBaseModel,
 }) => {
   const [messages, setMessages] = useState<ChatMessage[]>([
     {
@@ -71,6 +85,8 @@ export const ChatPlayground: React.FC<ChatPlaygroundProps> = ({
   const [comparisonMode, setComparisonMode] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [inspectedToken, setInspectedToken] = useState<GeneratedTokenInfo | null>(null);
+  // Id of the message whose token stream is expanded for inspection.
+  const [tokenStreamFor, setTokenStreamFor] = useState<string | null>(null);
 
   // Generation Hyperparameters
   const [options, setOptions] = useState<GenerationOptions>({
@@ -78,10 +94,24 @@ export const ChatPlayground: React.FC<ChatPlaygroundProps> = ({
     topK: 25,
     topP: 0.85,
     repetitionPenalty: 1.15,
-    maxNewTokens: 26,
+    // Room for a reply to reach a sentence it can stop on. At ~26 tokens the
+    // model regularly ran out of budget mid-clause and answers looked cut off.
+    maxNewTokens: 40,
   });
 
   const chatEndRef = useRef<HTMLDivElement>(null);
+
+  // Lazily-built base checkpoint used only by the comparison view. A separate
+  // instance is what makes "Base" actually mean "never fine-tuned".
+  const baseModelRef = useRef<{ key: string; model: SmallLanguageModel } | null>(null);
+
+  const getBaseModel = (): SmallLanguageModel => {
+    const key = `${model.config.id}:${model.config.vocabSize}`;
+    if (baseModelRef.current?.key !== key) {
+      baseModelRef.current = { key, model: createBaseModel() };
+    }
+    return baseModelRef.current.model;
+  };
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -95,6 +125,33 @@ export const ChatPlayground: React.FC<ChatPlaygroundProps> = ({
     setInputPrompt('');
     setIsGenerating(true);
 
+    try {
+      await runGeneration(text);
+    } finally {
+      // Always release the UI, even if a generation step throws.
+      setIsGenerating(false);
+    }
+  };
+
+  /**
+   * The turns handed back to the model as conversation history.
+   *
+   * Only real conversation belongs there: the synthetic welcome line and any
+   * assistant placeholder that never produced tokens are not turns the model
+   * actually had. The engine windows whatever is left to fit the context.
+   */
+  const chatHistory = () =>
+    messages
+      .filter((m) => m.content.trim().length > 0)
+      .filter((m) => m.role === 'user' || (m.tokens?.length ?? 0) > 0)
+      .slice(-4)
+      .map((m) => ({ role: m.role, content: m.content }));
+
+  /**
+   * Runs one generation turn. Split out of the submit handler so the handler
+   * can clear the busy flag on every path.
+   */
+  const runGeneration = async (text: string) => {
     const userMsgId = `user-${Date.now()}`;
     const userMsg: ChatMessage = {
       id: userMsgId,
@@ -126,10 +183,10 @@ export const ChatPlayground: React.FC<ChatPlaygroundProps> = ({
         finetuned: [...prev.finetuned, ftMsg],
       }));
 
-      const prompt = model.tokenizer.formatConversationPrompt(text);
+      const prompt = model.tokenizer.formatConversationPrompt(text, chatHistory());
       const ftTokens: GeneratedTokenInfo[] = [];
 
-      for await (const tokenInfo of model.generateStream(prompt, options, true)) {
+      for await (const tokenInfo of model.generateChatStream(prompt, options, true)) {
         ftTokens.push(tokenInfo);
         const decoded = model.tokenizer.decode(
           ftTokens.map((t) => t.id),
@@ -143,7 +200,14 @@ export const ChatPlayground: React.FC<ChatPlaygroundProps> = ({
         }));
       }
 
-      // 2. Generate Base model response (without LoRA / with base snapshot)
+      setCompareMessages((prev) => ({ ...prev, finetuned: finishReply(prev.finetuned, ftId) }));
+
+      // 2. Generate the Base model response from an independent, never-trained
+      // instance. Toggling LoRA off on the live model was not a base-model
+      // comparison: the statistical memory layer is shared state that
+      // fine-tuning mutates, and it supplies most of the sampling mass.
+      const baseModel = getBaseModel();
+      const basePrompt = baseModel.tokenizer.formatConversationPrompt(text, chatHistory());
       const baseId = `base-${Date.now()}`;
       const baseMsg: ChatMessage = {
         id: baseId,
@@ -160,9 +224,9 @@ export const ChatPlayground: React.FC<ChatPlaygroundProps> = ({
       }));
 
       const baseTokens: GeneratedTokenInfo[] = [];
-      for await (const tokenInfo of model.generateStream(prompt, options, false)) {
+      for await (const tokenInfo of baseModel.generateChatStream(basePrompt, options, true)) {
         baseTokens.push(tokenInfo);
-        const decoded = model.tokenizer.decode(
+        const decoded = baseModel.tokenizer.decode(
           baseTokens.map((t) => t.id),
           true
         );
@@ -173,6 +237,7 @@ export const ChatPlayground: React.FC<ChatPlaygroundProps> = ({
           ),
         }));
       }
+      setCompareMessages((prev) => ({ ...prev, base: finishReply(prev.base, baseId) }));
     } else {
       // Standard single chat
       setMessages((prev) => [...prev, userMsg]);
@@ -188,14 +253,12 @@ export const ChatPlayground: React.FC<ChatPlaygroundProps> = ({
 
       setMessages((prev) => [...prev, assistantMsg]);
 
-      // Format prompt with conversational history
-      const prompt = model.tokenizer.formatConversationPrompt(
-        text,
-        messages.slice(-4).map((m) => ({ role: m.role, content: m.content }))
-      );
+      // Format prompt with conversational history; the engine drops turns the
+      // context window cannot hold, so a long chat never stalls generation.
+      const prompt = model.tokenizer.formatConversationPrompt(text, chatHistory());
 
       const collectedTokens: GeneratedTokenInfo[] = [];
-      for await (const tokenInfo of model.generateStream(prompt, options, isFinetuned)) {
+      for await (const tokenInfo of model.generateChatStream(prompt, options, isFinetuned)) {
         collectedTokens.push(tokenInfo);
         const decoded = model.tokenizer.decode(
           collectedTokens.map((t) => t.id),
@@ -210,9 +273,10 @@ export const ChatPlayground: React.FC<ChatPlaygroundProps> = ({
           )
         );
       }
+      // Covers the case where the model spent a whole turn without emitting a
+      // token: the bubble must still say something.
+      setMessages((prev) => finishReply(prev, assistantId));
     }
-
-    setIsGenerating(false);
   };
 
   const clearChat = () => {
@@ -497,26 +561,46 @@ export const ChatPlayground: React.FC<ChatPlaygroundProps> = ({
                       : 'bg-slate-50 border border-slate-200 text-slate-800'
                   }`}
                 >
-                  {/* Assistant response with clickable interactive token chips */}
+                  {/*
+                    Assistant reply: the sentence itself, with the token stream
+                    folded away behind a toggle. Rendering every token as its own
+                    chip read as one word-box per line (a space token has no
+                    glyph, so it showed as ␣), which is not how a reply reads.
+                  */}
                   {msg.role === 'assistant' && msg.tokens && msg.tokens.length > 0 ? (
                     <div>
-                      <div className="flex flex-wrap gap-1 items-baseline">
-                        {msg.tokens.map((tok, i) => (
+                      <div>{msg.content}</div>
+                      <div className="mt-2 pt-2 border-t border-slate-200/60 text-[10px] text-slate-400">
+                        <div className="flex items-center justify-between gap-3">
+                          <span>
+                            {msg.tokens.length} tokens generated
+                            {tokenStreamFor === msg.id ? '' : ' · each one inspectable'}
+                          </span>
                           <button
-                            key={i}
-                            onClick={() => setInspectedToken(tok)}
-                            title={`Token: "${tok.token}", ID: ${tok.id}, Prob: ${(tok.prob * 100).toFixed(1)}%. Click to inspect logits.`}
-                            className="inline-block px-1 py-0.5 rounded hover:bg-indigo-100/70 text-slate-800 font-sans hover:text-indigo-900 transition-colors cursor-pointer border border-transparent hover:border-indigo-200"
+                            onClick={() =>
+                              setTokenStreamFor((prev) => (prev === msg.id ? null : msg.id))
+                            }
+                            className="flex items-center gap-1 text-indigo-600 hover:text-indigo-800 font-medium cursor-pointer transition-colors"
                           >
-                            {tok.token === ' ' ? '␣' : tok.token}
+                            <Info className="w-3 h-3" />
+                            {tokenStreamFor === msg.id ? 'Hide token stream' : 'Inspect token stream'}
                           </button>
-                        ))}
-                      </div>
-                      <div className="mt-2 pt-2 border-t border-slate-200/60 flex items-center justify-between text-[10px] text-slate-400">
-                        <span>{msg.tokens.length} tokens generated</span>
-                        <span className="flex items-center gap-1 text-indigo-600 font-medium cursor-pointer">
-                          <Info className="w-3 h-3" /> Click any token to view logits
-                        </span>
+                        </div>
+
+                        {tokenStreamFor === msg.id && (
+                          <div className="mt-2 flex flex-wrap gap-1 items-baseline bg-white/70 border border-slate-200 rounded-lg p-2">
+                            {msg.tokens.map((tok, i) => (
+                              <button
+                                key={i}
+                                onClick={() => setInspectedToken(tok)}
+                                title={`Token: ${JSON.stringify(tok.token)}, ID: ${tok.id}, Prob: ${(tok.prob * 100).toFixed(1)}%. Click to inspect logits.`}
+                                className="inline-block px-1 py-0.5 rounded hover:bg-indigo-100/70 text-slate-800 font-sans hover:text-indigo-900 transition-colors cursor-pointer border border-transparent hover:border-indigo-200"
+                              >
+                                {tok.token === ' ' ? '␣' : tok.token}
+                              </button>
+                            ))}
+                          </div>
+                        )}
                       </div>
                     </div>
                   ) : (

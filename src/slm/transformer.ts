@@ -10,10 +10,23 @@ import {
   createFloat32Matrix,
   createRandomNormalMatrix,
   layerNorm,
+  layerNormBackward,
   gelu,
+  geluDerivative,
   softmax,
   sampleFromDistribution
 } from './matrix';
+
+/**
+ * How many tokens a reply must produce before it is allowed to stop.
+ *
+ * The memory layer legitimately ranks EOS right after a sentence-ending period,
+ * and sampling would occasionally take it after a single token — producing a
+ * bare "." or one-word answer. Generation is already bounded by maxNewTokens,
+ * so holding EOS back for the first few tokens only ever turns a stub into a
+ * sentence.
+ */
+export const MIN_REPLY_TOKENS = 6;
 
 export interface AttentionLayerWeights {
   q_proj: Float32Array; // [dModel, dModel]
@@ -48,6 +61,33 @@ export interface TransformerWeights {
   lm_head: Float32Array; // [vocabSize, dModel]
 }
 
+/**
+ * Per-layer activations retained by a forward pass so the LoRA backward pass can
+ * differentiate the real network instead of a re-derived approximation of it.
+ * Allocated only when training asks for it.
+ */
+interface ActivationCache {
+  blockInput: Float32Array[]; // residual stream entering each block
+  norm1: Float32Array[]; // LN1 output
+  q: Float32Array[];
+  k: Float32Array[];
+  v: Float32Array[];
+  x1: Float32Array[]; // residual stream after the attention block
+  norm2: Float32Array[]; // LN2 output
+  finalResidual: Float32Array; // residual stream entering the final LayerNorm
+}
+
+/** Copy `count` floats, optionally at an offset into either side. */
+function copyInto(
+  dst: Float32Array,
+  src: Float32Array,
+  count: number,
+  dstOffset = 0,
+  srcOffset = 0
+): void {
+  for (let i = 0; i < count; i++) dst[dstOffset + i] = src[srcOffset + i];
+}
+
 export class SmallLanguageModel {
   public config: ModelConfig;
   public weights: TransformerWeights;
@@ -73,6 +113,11 @@ export class SmallLanguageModel {
   // Last computed attention maps for architecture inspector: [layer][head][seq_len, seq_len]
   public lastAttentionMaps: number[][][][] = [];
 
+  // A token id outside the vocabulary means the tokenizer and the model
+  // disagree; report it once instead of silently folding every bad id onto the
+  // last token. See forward().
+  private vocabMismatchWarned = false;
+
   // Statistical memory layer: a trigram language model with backoff that is
   // blended with the neural logits. A toy in-browser transformer cannot learn
   // fluent English from scratch, so this memory guarantees natural dialogue,
@@ -90,6 +135,33 @@ export class SmallLanguageModel {
   // soon as generation diverges from the learned answer.
   private caseReply: number[] | null = null;
   private casePos = 0;
+
+  // Tokens produced for the current reply, used to hold back a premature EOS.
+  private generatedCount = 0;
+
+  // Activation cache and gradient scratch for LoRA training, both allocated on
+  // first use so inference-only paths never pay for them.
+  private activationCache: ActivationCache | null = null;
+  private gradScratchReady = false;
+  private gNorm!: Float32Array; // dL/d(final LayerNorm output)
+  private gResidual!: Float32Array; // dL/d(block output)
+  private gX1!: Float32Array; // dL/d(residual after attention)
+  private gIn!: Float32Array; // dL/d(block input)
+  private gProjOut!: Float32Array;
+  private gAttnOut!: Float32Array;
+  private gQ!: Float32Array;
+  private gK!: Float32Array;
+  private gV!: Float32Array;
+  private gXNorm1!: Float32Array;
+  private gXNorm2Row!: Float32Array;
+  private gFfnPre!: Float32Array;
+  private gProbs!: Float32Array;
+  private gAttnRow!: Float32Array;
+  private dLora_qA!: Float32Array;
+  private dLora_qB!: Float32Array;
+  private dLora_vA!: Float32Array;
+  private dLora_vB!: Float32Array;
+  private adapterRow!: Float32Array;
 
   // Share of the final sampling distribution that comes from the neural
   // forward pass; the remainder comes from the statistical memory layer.
@@ -125,8 +197,10 @@ export class SmallLanguageModel {
     this.scratchFinalNorm = new Float32Array(maxT * d);
     this.scratchLogits = new Float32Array(maxT * v);
 
-    // Initialize the statistical memory layer with baseline conversational English
-    this.memory = new NgramLanguageModel(v);
+    // Initialize the statistical memory layer with baseline conversational English.
+    // The EOS id lets it learn how utterances end, so a reply can stop at a
+    // sentence boundary instead of being cut off by the token budget.
+    this.memory = new NgramLanguageModel(v, EOS_ID);
     this.seedMemoryCorpus();
 
     // Save baseline snapshot in a single compact TypedArray
@@ -274,6 +348,86 @@ export class SmallLanguageModel {
   }
 
   /**
+   * Fit an encoded prompt inside the model's context window, keeping the most
+   * recent turns.
+   *
+   * Generation keeps appending tokens to the prompt, so the prompt itself has
+   * to leave room for the reply. A multi-turn chat prompt that reached
+   * maxSeqLen makes the generation loop exit before its first step and produce
+   * nothing at all — which is what left the chat bubble blank once the
+   * conversation history grew. Oldest turns are dropped whole so the context
+   * still reads as clean user/assistant turns, and the final question is always
+   * kept.
+   */
+  private fitPromptToContext(tokens: number[], reserve: number): number[] {
+    const budget = Math.max(8, this.config.maxSeqLen - reserve);
+    if (tokens.length <= budget) return tokens;
+
+    // Turn boundaries: every prompt segment starts at a <user> or <assistant> tag.
+    const starts: number[] = [];
+    for (let i = 0; i < tokens.length; i++) {
+      if (tokens[i] === USER_ID || tokens[i] === ASSISTANT_ID) starts.push(i);
+    }
+
+    let cut = 0;
+    for (let i = starts.length - 1; i >= 0; i--) {
+      if (tokens.length - starts[i] > budget) break;
+      cut = starts[i];
+    }
+
+    const kept = cut > 0 ? tokens.slice(cut) : tokens;
+    // A single turn longer than the whole window: keep its tail, because a
+    // causal model only conditions on what comes last.
+    return kept.length > budget ? kept.slice(kept.length - budget) : kept;
+  }
+
+  /**
+   * Window a chat prompt down to the context the model can consume, leaving
+   * `reserve` tokens for the reply itself. Prompts that already fit are
+   * returned untouched.
+   */
+  private windowPrompt(prompt: string, reserve: number): string {
+    const budget = Math.max(8, this.config.maxSeqLen - reserve);
+    const tokens = this.tokenizer.encode(prompt, true, false);
+    if (tokens.length <= budget) return prompt;
+
+    // Decoding the kept ids (special tokens included) back to text keeps the
+    // <user>/<assistant> tags, so the re-encoded prompt is the same
+    // conversation minus its oldest turns.
+    return this.tokenizer.decode(this.fitPromptToContext(tokens, reserve), false);
+  }
+
+  /**
+   * Streaming generation for conversations.
+   *
+   * Identical to `generateStream`, except the prompt is first fitted to the
+   * context window (see `windowPrompt`). Use this whenever history accumulates:
+   * a prompt at or past maxSeqLen yields no tokens at all.
+   */
+  public async *generateChatStream(
+    prompt: string,
+    options: GenerationOptions,
+    useLora = true
+  ): AsyncGenerator<GeneratedTokenInfo> {
+    // The two tokens reserved on top of the reply are the reply-opening context
+    // `encodeForGeneration` appends.
+    const tokens = this.encodeForGeneration(this.windowPrompt(prompt, options.maxNewTokens + 2));
+
+    for (let step = 0; step < options.maxNewTokens; step++) {
+      if (tokens.length >= this.config.maxSeqLen) break;
+
+      const tokenInfo = this.generateNextToken(tokens, options, useLora);
+      tokens.push(tokenInfo.id);
+
+      yield tokenInfo;
+
+      if (tokenInfo.id === EOS_ID) break;
+
+      await new Promise((r) => setTimeout(r, 18));
+    }
+  }
+
+  /**
    * Save all weights to a single flat Float32Array.
    * Total memory is only ~150-400 KB with ZERO JSON string allocations.
    */
@@ -364,7 +518,7 @@ export class SmallLanguageModel {
    */
   public getMemoryStats(): {
     totalParams: number;
-    trainableParams: number;
+    lmHeadParams: number;
     loraParams: number;
     weightsMemoryBytes: number;
     scratchMemoryBytes: number;
@@ -386,7 +540,7 @@ export class SmallLanguageModel {
       this.scratchMid.length +
       this.scratchFinalNorm.length +
       this.scratchLogits.length
-    ) * 4;
+    ) * 4 + this.trainingScratchFloats() * 4;
     const snapshotMemoryBytes = (this.baseWeightsSnapshot?.length ?? 0) * 4;
     const totalBytes = weightsMemoryBytes + scratchMemoryBytes + snapshotMemoryBytes;
 
@@ -397,7 +551,7 @@ export class SmallLanguageModel {
 
     return {
       totalParams: this.totalWeightFloats,
-      trainableParams: this.totalWeightFloats,
+      lmHeadParams: this.config.vocabSize * this.config.dModel,
       loraParams,
       weightsMemoryBytes,
       scratchMemoryBytes,
@@ -408,22 +562,417 @@ export class SmallLanguageModel {
     };
   }
 
-  public countParameters(): { total: number; trainable: number; loraOnly: number } {
+  /**
+   * Parameter counts for the current adaptation mode.
+   *
+   * LoRA updates the adapters and a full retrain updates the LM head; neither
+   * touches every weight, so reporting `trainable: total` (as this used to)
+   * overstated what training can actually change.
+   */
+  public countParameters(loraMode = true): { total: number; trainable: number; loraOnly: number } {
     const stats = this.getMemoryStats();
     return {
       total: stats.totalParams,
-      trainable: stats.trainableParams,
+      trainable: loraMode ? stats.loraParams : stats.lmHeadParams,
       loraOnly: stats.loraParams
     };
   }
 
   /**
+   * Allocates the per-layer activation cache on first use. Sized from the
+   * configuration, so it is allocated once and never grows during training.
+   */
+  private ensureActivationCache(): ActivationCache {
+    if (this.activationCache) return this.activationCache;
+    const { nLayers, dModel, maxSeqLen } = this.config;
+    const tokenArea = maxSeqLen * dModel;
+    const cache: ActivationCache = {
+      blockInput: [],
+      norm1: [],
+      q: [],
+      k: [],
+      v: [],
+      x1: [],
+      norm2: [],
+      finalResidual: new Float32Array(tokenArea)
+    };
+    for (let l = 0; l < nLayers; l++) {
+      cache.blockInput.push(new Float32Array(tokenArea));
+      cache.norm1.push(new Float32Array(tokenArea));
+      cache.q.push(new Float32Array(tokenArea));
+      cache.k.push(new Float32Array(tokenArea));
+      cache.v.push(new Float32Array(tokenArea));
+      cache.x1.push(new Float32Array(tokenArea));
+      cache.norm2.push(new Float32Array(tokenArea));
+    }
+    this.activationCache = cache;
+    return cache;
+  }
+
+  /** Allocates the LoRA gradient scratch buffers on first use. */
+  private ensureGradScratch(): void {
+    if (this.gradScratchReady) return;
+    const { dModel, dFfn, vocabSize, maxSeqLen, loraRank } = this.config;
+    const tokenArea = maxSeqLen * dModel;
+    const rank = Math.max(1, loraRank);
+    this.gNorm = new Float32Array(tokenArea);
+    this.gResidual = new Float32Array(tokenArea);
+    this.gX1 = new Float32Array(tokenArea);
+    this.gIn = new Float32Array(tokenArea);
+    this.gProjOut = new Float32Array(tokenArea);
+    this.gAttnOut = new Float32Array(tokenArea);
+    this.gQ = new Float32Array(tokenArea);
+    this.gK = new Float32Array(tokenArea);
+    this.gV = new Float32Array(tokenArea);
+    this.gXNorm1 = new Float32Array(tokenArea);
+    this.gXNorm2Row = new Float32Array(dModel);
+    this.gFfnPre = new Float32Array(dFfn);
+    this.gProbs = new Float32Array(vocabSize);
+    this.gAttnRow = new Float32Array(maxSeqLen);
+    this.dLora_qA = new Float32Array(rank * dModel);
+    this.dLora_qB = new Float32Array(dModel * rank);
+    this.dLora_vA = new Float32Array(rank * dModel);
+    this.dLora_vB = new Float32Array(dModel * rank);
+    this.adapterRow = new Float32Array(rank);
+    this.gradScratchReady = true;
+  }
+
+  /**
+   * Bytes held by the LoRA activation cache and gradient scratch, which only
+   * exist once training with LoRA has run. Reported so the memory stats stay
+   * honest about what the model actually holds.
+   */
+  private trainingScratchFloats(): number {
+    let floats = 0;
+    const cache = this.activationCache;
+    if (cache) {
+      floats += cache.finalResidual.length;
+      for (let l = 0; l < cache.blockInput.length; l++) {
+        floats +=
+          cache.blockInput[l].length +
+          cache.norm1[l].length +
+          cache.q[l].length +
+          cache.k[l].length +
+          cache.v[l].length +
+          cache.x1[l].length +
+          cache.norm2[l].length;
+      }
+    }
+    if (this.gradScratchReady) {
+      floats +=
+        this.gNorm.length +
+        this.gResidual.length +
+        this.gX1.length +
+        this.gIn.length +
+        this.gProjOut.length +
+        this.gAttnOut.length +
+        this.gQ.length +
+        this.gK.length +
+        this.gV.length +
+        this.gXNorm1.length +
+        this.gXNorm2Row.length +
+        this.gFfnPre.length +
+        this.gProbs.length +
+        this.gAttnRow.length +
+        this.dLora_qA.length +
+        this.dLora_qB.length +
+        this.dLora_vA.length +
+        this.dLora_vB.length +
+        this.adapterRow.length;
+    }
+    return floats;
+  }
+
+  /**
+   * Applies one accumulated adapter gradient: w -= lr * (mean(dW) + wd * w).
+   * The gradient is a sum over the sequence's positions, so it is averaged here
+   * to keep the learning rate independent of sequence length.
+   */
+  private applyAdapterUpdate(
+    param: Float32Array,
+    grad: Float32Array,
+    targetCount: number,
+    learningRate: number,
+    weightDecay: number
+  ): void {
+    const invCount = targetCount > 0 ? 1 / targetCount : 0;
+    for (let i = 0; i < param.length; i++) {
+      param[i] -= learningRate * (grad[i] * invCount + weightDecay * param[i]);
+    }
+  }
+
+  /**
+   * Accumulates one LoRA adapter's gradient at a single position, and adds the
+   * adapter's contribution to the gradient w.r.t. the LN1 output.
+   *
+   * With A as [rank, dModel], B as [dModel, rank] and u = loraScale * A x, the
+   * adapter contributes loraScale * B u to the projection output, so both
+   * gradients carry that factor.
+   */
+  private accumulateAdapterGradient(
+    x: Float32Array,
+    xOffset: number,
+    dOut: Float32Array,
+    gXNorm: Float32Array,
+    gXNormOffset: number,
+    A: Float32Array,
+    B: Float32Array,
+    dA: Float32Array,
+    dB: Float32Array,
+    loraScale: number,
+    dModel: number,
+    loraRank: number
+  ): void {
+    // u = loraScale * A x — the vector B maps back up to model width.
+    for (let r = 0; r < loraRank; r++) {
+      let val = 0;
+      const aOffset = r * dModel;
+      for (let c = 0; c < dModel; c++) val += A[aOffset + c] * x[xOffset + c];
+      this.adapterRow[r] = val * loraScale;
+    }
+    // dL/dB[row][r] += dL/dout[row] * u[r]
+    for (let row = 0; row < dModel; row++) {
+      const g = dOut[xOffset + row];
+      if (g === 0) continue;
+      for (let r = 0; r < loraRank; r++) {
+        dB[row * loraRank + r] += g * this.adapterRow[r];
+      }
+    }
+    // dL/du[r] = sum_row dL/dout[row] * B[row][r]
+    for (let r = 0; r < loraRank; r++) {
+      let sum = 0;
+      for (let row = 0; row < dModel; row++) sum += dOut[xOffset + row] * B[row * loraRank + r];
+      this.adapterRow[r] = sum * loraScale;
+    }
+    // dL/dA[r][c] += dL/du[r] * x[c], and the adapter's path into x.
+    for (let r = 0; r < loraRank; r++) {
+      const gU = this.adapterRow[r];
+      if (gU === 0) continue;
+      const aOffset = r * dModel;
+      for (let c = 0; c < dModel; c++) {
+        gXNorm[gXNormOffset + c] += gU * A[aOffset + c];
+        dA[aOffset + c] += gU * x[xOffset + c];
+      }
+    }
+  }
+
+  /**
+   * Backward pass through the frozen network for the LoRA adapters.
+   *
+   * Fine-tuning used to nudge a single `lora_v_B` row chosen by
+   * `targetToken % dModel`, scaled by the loss gradient. That row has no
+   * relationship to the parameter's true gradient, so the update moved the loss
+   * in an arbitrary direction, and `lora_q_A`/`lora_q_B` were never updated at
+   * all. This differentiates the token cross-entropy w.r.t. every adapter weight
+   * and applies dL/dW — the real LoRA update.
+   *
+   * Every base weight (projections, feed-forward, embeddings, LM head) stays
+   * frozen, so the adapters remain the only thing training can change and a
+   * reset still restores the pretrained model exactly.
+   */
+  private backwardLora(
+    tokens: number[],
+    seqLen: number,
+    learningRate: number,
+    weightDecay: number,
+    targetCount: number
+  ): void {
+    const cache = this.activationCache;
+    if (!cache) return;
+    this.ensureGradScratch();
+
+    const { dModel, nHeads, nLayers, dFfn, vocabSize, loraRank, loraAlpha } = this.config;
+    const headDim = Math.floor(dModel / nHeads);
+    const loraScale = loraRank > 0 ? loraAlpha / loraRank : 1.0;
+    const attnScale = 1.0 / Math.sqrt(headDim);
+    const tokenArea = seqLen * dModel;
+
+    // 1. Cross-entropy gradient: dL/dlogits = softmax - onehot, so
+    //    dL/dz = lm_head^T dL/dlogits at every position.
+    this.gNorm.fill(0);
+    for (let i = 0; i < seqLen - 1; i++) {
+      const targetToken = tokens[i + 1];
+      if (targetToken === PAD_ID) continue;
+      const logitRow = this.scratchLogits.subarray(i * vocabSize, (i + 1) * vocabSize);
+      softmax(logitRow, this.gProbs, 1.0);
+      const rowOffset = i * dModel;
+      for (let v = 0; v < vocabSize; v++) {
+        const grad = this.gProbs[v] - (v === targetToken ? 1.0 : 0.0);
+        if (grad === 0) continue;
+        const vOffset = v * dModel;
+        for (let d = 0; d < dModel; d++) {
+          this.gNorm[rowOffset + d] += grad * this.weights.lm_head[vOffset + d];
+        }
+      }
+    }
+
+    // 2. Final LayerNorm -> gradient w.r.t. the residual stream after the blocks.
+    for (let i = 0; i < seqLen; i++) {
+      layerNormBackward(
+        cache.finalResidual,
+        i * dModel,
+        this.weights.ln_f_gamma,
+        this.gNorm,
+        i * dModel,
+        this.gResidual,
+        i * dModel,
+        dModel
+      );
+    }
+
+    // 3. One block at a time, top down. The cached activations come from the
+    //    forward pass this gradient belongs to, so applying a block's adapter
+    //    update early cannot disturb the gradients of the blocks below it.
+    for (let l = nLayers - 1; l >= 0; l--) {
+      const layer = this.weights.layers[l];
+      const blockInput = cache.blockInput[l];
+      const norm1 = cache.norm1[l];
+      const cachedQ = cache.q[l];
+      const cachedK = cache.k[l];
+      const cachedV = cache.v[l];
+      const x1 = cache.x1[l];
+      const norm2 = cache.norm2[l];
+
+      // --- Feed-forward: dL/dpreAct, then dL/dxNorm2 ---
+      for (let i = 0; i < seqLen; i++) {
+        const rowOffset = i * dModel;
+        for (let r = 0; r < dFfn; r++) {
+          let dMid = 0;
+          const rOffset = r * dModel;
+          for (let row = 0; row < dModel; row++) {
+            dMid += this.gResidual[rowOffset + row] * layer.fc2[row * dFfn + r];
+          }
+          let preAct = layer.fc1_b[r];
+          for (let c = 0; c < dModel; c++) preAct += layer.fc1[rOffset + c] * norm2[rowOffset + c];
+          this.gFfnPre[r] = dMid * geluDerivative(preAct);
+        }
+        for (let c = 0; c < dModel; c++) {
+          let sum = 0;
+          for (let r = 0; r < dFfn; r++) sum += this.gFfnPre[r] * layer.fc1[r * dModel + c];
+          this.gXNorm2Row[c] = sum;
+        }
+        layerNormBackward(x1, rowOffset, layer.ln2_gamma, this.gXNorm2Row, 0, this.gX1, rowOffset, dModel);
+      }
+      // x_{l+1} = x1 + ffnOut, so the residual path reuses the incoming gradient.
+      for (let idx = 0; idx < tokenArea; idx++) this.gX1[idx] += this.gResidual[idx];
+
+      // --- Attention: dL/dattnOut, then dL/dQ, dL/dK, dL/dV ---
+      copyInto(this.gProjOut, this.gX1, tokenArea);
+      for (let i = 0; i < seqLen; i++) {
+        const rowOffset = i * dModel;
+        for (let c = 0; c < dModel; c++) {
+          let sum = 0;
+          for (let row = 0; row < dModel; row++) {
+            sum += this.gProjOut[rowOffset + row] * layer.out_proj[row * dModel + c];
+          }
+          this.gAttnOut[rowOffset + c] = sum;
+        }
+      }
+
+      this.gQ.fill(0, 0, tokenArea);
+      this.gK.fill(0, 0, tokenArea);
+      this.gV.fill(0, 0, tokenArea);
+      const attentionMaps = this.lastAttentionMaps[l];
+      for (let h = 0; h < nHeads; h++) {
+        const headOffset = h * headDim;
+        for (let i = 0; i < seqLen; i++) {
+          const outOffset = i * dModel + headOffset;
+          const weights = attentionMaps?.[h]?.[i];
+          if (!weights) continue;
+
+          let weightGradSum = 0;
+          for (let j = 0; j <= i; j++) {
+            const vjOffset = j * dModel + headOffset;
+            let dot = 0;
+            for (let d = 0; d < headDim; d++) {
+              dot += this.gAttnOut[outOffset + d] * cachedV[vjOffset + d];
+            }
+            this.gAttnRow[j] = dot;
+            weightGradSum += weights[j] * dot;
+          }
+          // dL/dV_j += w_ij * dL/dattnOut_i
+          for (let j = 0; j <= i; j++) {
+            const w = weights[j];
+            if (w === 0) continue;
+            const vjOffset = j * dModel + headOffset;
+            for (let d = 0; d < headDim; d++) {
+              this.gV[vjOffset + d] += w * this.gAttnOut[outOffset + d];
+            }
+          }
+          // Softmax backward, folded with the 1/sqrt(headDim) attention scale.
+          for (let j = 0; j <= i; j++) {
+            const gScores = weights[j] * (this.gAttnRow[j] - weightGradSum) * attnScale;
+            if (gScores === 0) continue;
+            const kjOffset = j * dModel + headOffset;
+            for (let d = 0; d < headDim; d++) {
+              this.gQ[outOffset + d] += gScores * cachedK[kjOffset + d];
+              this.gK[kjOffset + d] += gScores * cachedQ[outOffset + d];
+            }
+          }
+        }
+      }
+
+      // --- Adapter gradients, dL/dxNorm1, and the LN1 backward ---
+      this.dLora_qA.fill(0);
+      this.dLora_qB.fill(0);
+      this.dLora_vA.fill(0);
+      this.dLora_vB.fill(0);
+      for (let i = 0; i < seqLen; i++) {
+        const rowOffset = i * dModel;
+
+        // Frozen projections back to the LN1 output.
+        for (let c = 0; c < dModel; c++) {
+          let sum = 0;
+          for (let row = 0; row < dModel; row++) {
+            sum +=
+              this.gQ[rowOffset + row] * layer.q_proj[row * dModel + c] +
+              this.gK[rowOffset + row] * layer.k_proj[row * dModel + c] +
+              this.gV[rowOffset + row] * layer.v_proj[row * dModel + c];
+          }
+          this.gXNorm1[rowOffset + c] = sum;
+        }
+
+        if (loraRank > 0) {
+          this.accumulateAdapterGradient(
+            norm1, rowOffset, this.gV, this.gXNorm1, rowOffset,
+            layer.lora_v_A, layer.lora_v_B, this.dLora_vA, this.dLora_vB,
+            loraScale, dModel, loraRank
+          );
+          this.accumulateAdapterGradient(
+            norm1, rowOffset, this.gQ, this.gXNorm1, rowOffset,
+            layer.lora_q_A, layer.lora_q_B, this.dLora_qA, this.dLora_qB,
+            loraScale, dModel, loraRank
+          );
+        }
+
+        // dL/dx_l = dL/dx1 + LN1 backward
+        layerNormBackward(blockInput, rowOffset, layer.ln1_gamma, this.gXNorm1, rowOffset, this.gIn, rowOffset, dModel);
+      }
+      for (let idx = 0; idx < tokenArea; idx++) this.gIn[idx] += this.gX1[idx];
+
+      // One update per block, averaged over the sequence's positions.
+      if (loraRank > 0) {
+        this.applyAdapterUpdate(layer.lora_q_A, this.dLora_qA, targetCount, learningRate, weightDecay);
+        this.applyAdapterUpdate(layer.lora_q_B, this.dLora_qB, targetCount, learningRate, weightDecay);
+        this.applyAdapterUpdate(layer.lora_v_A, this.dLora_vA, targetCount, learningRate, weightDecay);
+        this.applyAdapterUpdate(layer.lora_v_B, this.dLora_vB, targetCount, learningRate, weightDecay);
+      }
+
+      copyInto(this.gResidual, this.gIn, tokenArea);
+    }
+  }
+
+  /**
    * Forward pass: computes logits using pre-allocated scratch memory to prevent GC lag.
    * Returns view of computed logits for sequence.
+   *
+   * Passing `cacheActivations` additionally retains the per-layer activations the
+   * LoRA backward pass needs; inference never pays for that buffer.
    */
   public forward(
     tokens: number[],
-    useLora = true
+    useLora = true,
+    cacheActivations = false
   ): {
     logits: Float32Array; // [seqLen, vocabSize]
     seqLen: number;
@@ -432,6 +981,8 @@ export class SmallLanguageModel {
     const seqLen = Math.min(tokens.length, this.config.maxSeqLen);
     const headDim = Math.floor(dModel / nHeads);
     const loraScale = loraRank > 0 ? loraAlpha / loraRank : 1.0;
+    const cache = cacheActivations ? this.ensureActivationCache() : null;
+    const tokenArea = seqLen * dModel;
 
     // Reset attention visualization structures
     this.lastAttentionMaps = [];
@@ -445,6 +996,24 @@ export class SmallLanguageModel {
     }
 
     // 1. Embedding lookup: scratchX[i] = wte[tokens[i]] + wpe[i]
+    //
+    // An id outside the vocabulary means the tokenizer and the model were built
+    // from different vocabularies. Clamping keeps generation alive, but silently
+    // folding every such id onto the final token hides a real configuration bug,
+    // so report it once per model instance.
+    if (!this.vocabMismatchWarned) {
+      for (let i = 0; i < seqLen; i++) {
+        if (tokens[i] < 0 || tokens[i] >= vocabSize) {
+          this.vocabMismatchWarned = true;
+          console.warn(
+            `[slm] token id ${tokens[i]} at position ${i} is outside the ${vocabSize}-token ` +
+              `vocabulary; the tokenizer grew after this model was built. Rebuild the model ` +
+              `so the new tokens get embeddings.`
+          );
+          break;
+        }
+      }
+    }
     for (let i = 0; i < seqLen; i++) {
       const tokenId = Math.min(Math.max(0, tokens[i]), vocabSize - 1);
       const wteOffset = tokenId * dModel;
@@ -460,12 +1029,15 @@ export class SmallLanguageModel {
     for (let l = 0; l < nLayers; l++) {
       const layer = this.weights.layers[l];
 
+      if (cache) copyInto(cache.blockInput[l], this.scratchX, tokenArea);
+
       // LayerNorm 1
       for (let i = 0; i < seqLen; i++) {
         const rowIn = this.scratchX.subarray(i * dModel, (i + 1) * dModel);
         const rowOut = this.scratchXNorm1.subarray(i * dModel, (i + 1) * dModel);
         layerNorm(rowIn, layer.ln1_gamma, layer.ln1_beta, rowOut, dModel);
       }
+      if (cache) copyInto(cache.norm1[l], this.scratchXNorm1, tokenArea);
 
       // Linear projections: Q, K, V
       for (let i = 0; i < seqLen; i++) {
@@ -505,6 +1077,11 @@ export class SmallLanguageModel {
           ki[row] = sumK;
           vi[row] = sumV;
         }
+      }
+      if (cache) {
+        copyInto(cache.q[l], this.scratchQ, tokenArea);
+        copyInto(cache.k[l], this.scratchK, tokenArea);
+        copyInto(cache.v[l], this.scratchV, tokenArea);
       }
 
       // Multi-Head Attention with causal mask
@@ -563,6 +1140,7 @@ export class SmallLanguageModel {
       for (let idx = 0; idx < seqLen * dModel; idx++) {
         this.scratchX[idx] += this.scratchProjOut[idx];
       }
+      if (cache) copyInto(cache.x1[l], this.scratchX, tokenArea);
 
       // LayerNorm 2
       for (let i = 0; i < seqLen; i++) {
@@ -570,6 +1148,7 @@ export class SmallLanguageModel {
         const rowOut = this.scratchXNorm2.subarray(i * dModel, (i + 1) * dModel);
         layerNorm(rowIn, layer.ln2_gamma, layer.ln2_beta, rowOut, dModel);
       }
+      if (cache) copyInto(cache.norm2[l], this.scratchXNorm2, tokenArea);
 
       // FFN: x = x + fc2(gelu(fc1(xNorm2)))
       for (let i = 0; i < seqLen; i++) {
@@ -597,6 +1176,8 @@ export class SmallLanguageModel {
         }
       }
     }
+
+    if (cache) copyInto(cache.finalResidual, this.scratchX, tokenArea);
 
     // 3. Final LayerNorm
     for (let i = 0; i < seqLen; i++) {
@@ -636,16 +1217,20 @@ export class SmallLanguageModel {
     loraMode = true,
     weightDecay = 0.005
   ): { loss: number; perplexity: number } {
-    const { vocabSize, dModel, loraRank, loraAlpha } = this.config;
+    const { vocabSize, dModel, loraRank } = this.config;
     const seqLen = Math.min(tokens.length, this.config.maxSeqLen);
     if (seqLen <= 1) return { loss: 0, perplexity: 1.0 };
 
+    // LoRA training differentiates the layers, so it needs this exact forward
+    // pass to retain its activations; a full retrain only needs the final
+    // hidden states.
+    const loraTraining = loraMode && loraRank > 0;
+
     // Forward pass
-    const { logits } = this.forward(tokens, loraMode);
+    const { logits } = this.forward(tokens, loraMode, loraTraining);
 
     let totalLoss = 0;
     let targetCount = 0;
-    const loraScale = loraRank > 0 ? loraAlpha / loraRank : 1.0;
 
     // Train the statistical memory layer on this sequence so fine-tuning
     // visibly teaches the model the new persona / dataset phrases.
@@ -697,26 +1282,9 @@ export class SmallLanguageModel {
       totalLoss += -Math.log(targetProb);
       targetCount++;
 
-      // Cross-entropy gradient signal for this position
-      const gradTarget = targetProb - 1.0;
       const hOffset = i * dModel;
 
-      if (loraMode && loraRank > 0) {
-        // Adapter updates conditioned on the hidden state at this position:
-        // reinforce the LoRA B rows that map context features toward the target.
-        const factor = learningRate * 0.5 * gradTarget * loraScale;
-        for (const layer of this.weights.layers) {
-          const bRow = (targetToken % dModel) * loraRank;
-          for (let r = 0; r < loraRank; r++) {
-            let aVal = 0;
-            const aOffset = r * dModel;
-            for (let c = 0; c < dModel; c++) {
-              aVal += layer.lora_v_A[aOffset + c] * hidden[hOffset + c];
-            }
-            layer.lora_v_B[bRow + r] -= factor * aVal;
-          }
-        }
-      } else {
+      if (!loraMode) {
         // Full fine-tuning: real cross-entropy gradient descent on lm_head rows.
         // dL/dlogit_v = mixed[v] - 1[v==target]; applied via the hidden state.
         const lr = learningRate * 0.35;
@@ -725,10 +1293,19 @@ export class SmallLanguageModel {
           if (Math.abs(grad) < 0.004) continue; // skip negligible gradients
           const vOffset = v * dModel;
           for (let d = 0; d < dModel; d++) {
-            this.weights.lm_head[vOffset + d] -= lr * grad * hidden[hOffset + d];
+            const w = this.weights.lm_head[vOffset + d];
+            // Cross-entropy gradient plus L2 weight decay.
+            this.weights.lm_head[vOffset + d] -= lr * (grad * hidden[hOffset + d] + weightDecay * w);
           }
         }
       }
+    }
+
+    // LoRA adapters learn from a real backward pass over this sequence, run
+    // after the loss loop so the same forward activations yield both the
+    // reported loss and the gradient.
+    if (loraTraining) {
+      this.backwardLora(tokens, seqLen, learningRate, weightDecay, targetCount);
     }
 
     const avgLoss = targetCount > 0 ? totalLoss / targetCount : 0;
@@ -754,9 +1331,12 @@ export class SmallLanguageModel {
     const lastOffset = (seqLen - 1) * vocabSize;
     const rawLogits = logits.subarray(lastOffset, lastOffset + vocabSize);
 
-    // --- Neural distribution (temperature-scaled softmax over logits) ---
+    // --- Neural distribution (raw softmax) ---
+    // Temperature is applied exactly once, to the blended distribution below.
+    // Scaling the logits here *and* re-sharpening the mix would square the
+    // effect, so a slider value of 0.7 would sample like ~0.49.
     const neuralProbs = new Float32Array(vocabSize);
-    softmax(rawLogits, neuralProbs, options.temperature);
+    softmax(rawLogits, neuralProbs, 1.0);
 
     // --- Statistical memory distribution (trigram -> bigram -> unigram backoff) ---
     const n = tokens.length;
@@ -817,6 +1397,11 @@ export class SmallLanguageModel {
         p = 0;
       }
 
+      // Keep EOS available, but not before the reply has actually started.
+      if (v === EOS_ID && this.generatedCount < MIN_REPLY_TOKENS) {
+        p = 0;
+      }
+
       // Never spell out OOV words character by character
       if (isLetterChar(v)) {
         p = 0;
@@ -858,7 +1443,6 @@ export class SmallLanguageModel {
     // Sample next token
     const sample = sampleFromDistribution(
       probs,
-      options.temperature,
       options.topK,
       options.topP,
       options.repetitionPenalty,
@@ -873,6 +1457,8 @@ export class SmallLanguageModel {
       if (sample.chosenId === caseToken) this.casePos++;
       else this.caseReply = null;
     }
+
+    this.generatedCount++;
 
     const topCandidates = sample.candidates.map(c => ({
       id: c.id,
@@ -942,6 +1528,7 @@ export class SmallLanguageModel {
     this.pendingReplyWord = null;
     this.caseReply = null;
     this.casePos = 0;
+    this.generatedCount = 0;
     const asstIdx = tokens.lastIndexOf(ASSISTANT_ID);
     if (asstIdx >= 0) {
       // Replay the answer fine-tuning learned for this user message.

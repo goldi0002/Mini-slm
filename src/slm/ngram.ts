@@ -14,11 +14,30 @@
  * on-persona sentences. Fine-tuning reinforces both.
  */
 
+/**
+ * Sentence-boundary stop rule.
+ *
+ * A token counts as a sentence ender when the corpus has been observed ending
+ * an utterance with it — "?", "!" and "." in practice, learned from the data
+ * rather than listed here. `MASS` is added on top of a distribution normalized
+ * to 1, so EOS ends up with `MASS / (1 + MASS)` of the mass at such a boundary.
+ *
+ * The point is completion: sampling alone let a reply ramble past the sentence
+ * it had just finished and then be cut mid-clause by the token budget, so
+ * answers never looked finished.
+ */
+const SENTENCE_END_STOP_MASS = 6;
+
 export interface NgramSnapshot {
   uni: Map<number, number>; // token -> count
   bi: Map<number, Map<number, number>>; // prev1 -> (next -> count)
   tri: Map<number, Map<number, number>>; // (prev2 * vocabSize + prev1) -> (next -> count)
   total: number;
+  // Tokens observed immediately before the EOS of an utterance, plus how many
+  // utterance endings were seen in total. This is what lets generation stop at
+  // a sentence boundary instead of running into the token limit.
+  enders: Map<number, number>;
+  endersTotal: number;
   // Dialogue-pair links: last word of a user message -> first word of the
   // matching reply (plus a global count of every reply opening).
   links: Map<number, Map<number, number>>;
@@ -28,14 +47,16 @@ export interface NgramSnapshot {
   cases: Map<string, number[]>;
 }
 
-const EMPTY_MAP: Map<number, number> = new Map();
-
 export class NgramLanguageModel {
   public vocabSize: number;
   private tables: NgramSnapshot;
+  // End-of-utterance id, needed by the sentence-boundary stop rule. -1 means the
+  // caller never told us how utterances end, so the rule stays off.
+  private eosId: number;
 
-  constructor(vocabSize: number) {
+  constructor(vocabSize: number, eosId = -1) {
     this.vocabSize = vocabSize;
+    this.eosId = eosId;
     this.tables = {
       uni: new Map(),
       bi: new Map(),
@@ -44,6 +65,8 @@ export class NgramLanguageModel {
       links: new Map(),
       openers: new Map(),
       cases: new Map(),
+      enders: new Map(),
+      endersTotal: 0,
     };
   }
 
@@ -76,6 +99,16 @@ export class NgramLanguageModel {
           t.tri.set(k, triMap);
         }
         triMap.set(cur, (triMap.get(cur) ?? 0) + weight);
+      }
+    }
+
+    // Utterance endings: the token right before a trailing EOS. A truncated
+    // sequence (no EOS last) records nothing, which is right — it did not end.
+    if (this.eosId >= 0 && tokens.length >= 2 && tokens[tokens.length - 1] === this.eosId) {
+      const ender = tokens[tokens.length - 2];
+      if (ender !== this.eosId) {
+        t.enders.set(ender, (t.enders.get(ender) ?? 0) + weight);
+        t.endersTotal += weight;
       }
     }
   }
@@ -191,34 +224,6 @@ export class NgramLanguageModel {
   }
 
   /**
-   * Probability of `next` given the two preceding tokens, with interpolation:
-   * weighted mix of trigram, bigram, unigram (levels fall back when unseen).
-   */
-  public prob(next: number, prev2: number, prev1: number, tables?: NgramSnapshot): number {
-    const t = tables ?? this.tables;
-    let p = 0;
-    let weightSum = 0;
-
-    // Unigram always available
-    p += 0.15 * ((t.uni.get(next) ?? 0) / Math.max(1, t.total));
-    weightSum += 0.15;
-
-    const biMap = t.bi.get(prev1);
-    if (biMap) {
-      p += 0.35 * ((biMap.get(next) ?? 0) / Math.max(1, this.mapSum(biMap)));
-      weightSum += 0.35;
-    }
-
-    const triMap = t.tri.get(this.key(prev2, prev1));
-    if (triMap) {
-      p += 0.5 * ((triMap.get(next) ?? 0) / Math.max(1, this.mapSum(triMap)));
-      weightSum += 0.5;
-    }
-
-    return p / weightSum;
-  }
-
-  /**
    * Compute the full next-token distribution for a context, efficiently.
    * Fills `out` (length >= vocabSize) using stage-wise backoff: when a deeper
    * context (trigram, then bigram) was observed, it dominates the
@@ -257,6 +262,15 @@ export class NgramLanguageModel {
       }
     }
 
+    // Sentence-boundary stop rule. When the previous token is one the corpus
+    // uses to end utterances — ".", "!", "?" after even a small amount of
+    // training — the reply is allowed to finish here. Without this it rambles
+    // past the sentence it just completed and is stopped by the token budget
+    // mid-clause, which reads as an unfinished answer.
+    if (this.eosId >= 0 && this.eosId < out.length && (t.enders.get(prev1) ?? 0) > 0) {
+      out[this.eosId] += SENTENCE_END_STOP_MASS;
+    }
+
     // Renormalize so the distribution sums to 1
     let sum = 0;
     for (let v = 0; v < out.length; v++) sum += out[v];
@@ -264,15 +278,6 @@ export class NgramLanguageModel {
       const inv = 1 / sum;
       for (let v = 0; v < out.length; v++) out[v] *= inv;
     }
-  }
-
-  /** Deepest matching context length (3 = trigram hit, 2 = bigram, 1 = unigram, 0 = none). */
-  public contextDepth(prev2: number, prev1: number, tables?: NgramSnapshot): number {
-    const t = tables ?? this.tables;
-    if (t.tri.has(this.key(prev2, prev1))) return 3;
-    if (t.bi.has(prev1)) return 2;
-    if (t.uni.size > 0) return 1;
-    return 0;
   }
 
   private static copyNested(src: Map<number, Map<number, number>>): Map<number, Map<number, number>> {
@@ -293,6 +298,8 @@ export class NgramLanguageModel {
       links: NgramLanguageModel.copyNested(this.tables.links),
       openers: new Map(this.tables.openers),
       cases,
+      enders: new Map(this.tables.enders),
+      endersTotal: this.tables.endersTotal,
     };
   }
 
@@ -307,11 +314,11 @@ export class NgramLanguageModel {
     const cases = new Map<string, number[]>();
     for (const [k, seq] of snap.cases) cases.set(k, [...seq]);
     this.tables.cases = cases;
+    this.tables.enders = new Map(snap.enders);
+    this.tables.endersTotal = snap.endersTotal;
   }
 
   public get size(): number {
     return this.tables.total;
   }
-
-  public static readonly emptyMap: Map<number, number> = EMPTY_MAP;
 }

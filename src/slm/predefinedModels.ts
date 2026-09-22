@@ -9,6 +9,25 @@ import { SmallLanguageModel } from './transformer';
 import { PREDEFINED_DATASETS, generateExpandedChatCorpus } from './datasets';
 
 /**
+ * Baseline dialogue the base model is pre-trained on.
+ *
+ * Declared before `ensureVocabulary()` runs so every one of its words is taught
+ * to the tokenizer first: an unknown word encodes as single-character fallback
+ * tokens, which generation suppresses, so the warm-up would train the model on
+ * distributions it can never emit (and the memory layer would waste most of its
+ * probability mass on unreachable tokens).
+ */
+const PRETRAIN_CORPUS: string[] = [
+  `${SPECIAL_TOKENS.USER} hello ${SPECIAL_TOKENS.NEWLINE}${SPECIAL_TOKENS.ASSISTANT} hello ! how are you doing today ?`,
+  `${SPECIAL_TOKENS.USER} hi how are you ${SPECIAL_TOKENS.NEWLINE}${SPECIAL_TOKENS.ASSISTANT} I am doing wonderful , thank you for asking ! how can I help you ?`,
+  `${SPECIAL_TOKENS.USER} who are you ${SPECIAL_TOKENS.NEWLINE}${SPECIAL_TOKENS.ASSISTANT} I am your friendly conversational AI assistant here to chat and help you .`,
+  `${SPECIAL_TOKENS.USER} what can you do ${SPECIAL_TOKENS.NEWLINE}${SPECIAL_TOKENS.ASSISTANT} I can converse with you , share ideas , and be fine tuned on custom chat datasets .`,
+  `${SPECIAL_TOKENS.USER} can you help me ${SPECIAL_TOKENS.NEWLINE}${SPECIAL_TOKENS.ASSISTANT} certainly ! tell me what is on your mind and I will do my best to assist .`,
+  `${SPECIAL_TOKENS.USER} thank you ${SPECIAL_TOKENS.NEWLINE}${SPECIAL_TOKENS.ASSISTANT} you are very welcome ! I am always delighted to chat with you .`,
+  `${SPECIAL_TOKENS.USER} how does this work ${SPECIAL_TOKENS.NEWLINE}${SPECIAL_TOKENS.ASSISTANT} I run locally in your browser using a small causal transformer with low memory .`
+];
+
+/**
  * Teach the shared tokenizer the vocabulary of every built-in corpus and
  * dataset BEFORE any model is constructed. Words that are not in the base
  * vocabulary would otherwise be reduced to single-character fallback tokens,
@@ -26,6 +45,7 @@ function ensureVocabulary(): void {
   vocabularyExpanded = true;
   const corpusTexts = [
     ...SmallLanguageModel.BASE_CORPUS,
+    ...PRETRAIN_CORPUS,
     ...PREDEFINED_DATASETS.flatMap((d) => d.turns.flatMap((t) => [t.user, t.assistant])),
     ...PREDEFINED_DATASETS.flatMap((d) =>
       generateExpandedChatCorpus(d, 100).flatMap((t) => [t.user, t.assistant])
@@ -48,7 +68,9 @@ export const PREDEFINED_MODELS: ModelConfig[] = [
     nHeads: 4,
     nLayers: 2,
     dFfn: 96,
-    maxSeqLen: 64,
+    // Context holds the reply as well as the prompt: a ~40 token answer plus
+    // the recent turns needs more than the 64 this started with.
+    maxSeqLen: 96,
     loraRank: 4,
     loraAlpha: 8,
   },
@@ -61,7 +83,7 @@ export const PREDEFINED_MODELS: ModelConfig[] = [
     nHeads: 4,
     nLayers: 2,
     dFfn: 64,
-    maxSeqLen: 48,
+    maxSeqLen: 64,
     loraRank: 4,
     loraAlpha: 8,
   },
@@ -74,7 +96,7 @@ export const PREDEFINED_MODELS: ModelConfig[] = [
     nHeads: 4,
     nLayers: 3,
     dFfn: 128,
-    maxSeqLen: 64,
+    maxSeqLen: 96,
     loraRank: 8,
     loraAlpha: 16,
   }
@@ -95,15 +117,7 @@ export function initializePretrainedModel(config: ModelConfig): SmallLanguageMod
   const model = new SmallLanguageModel(config, defaultTokenizer);
 
   // Pre-seed natural conversational dialogues into the memory layer
-  const conversationalCorpus = [
-    `${SPECIAL_TOKENS.USER} hello ${SPECIAL_TOKENS.NEWLINE}${SPECIAL_TOKENS.ASSISTANT} hello ! how are you doing today ?`,
-    `${SPECIAL_TOKENS.USER} hi how are you ${SPECIAL_TOKENS.NEWLINE}${SPECIAL_TOKENS.ASSISTANT} I am doing wonderful , thank you for asking ! how can I help you ?`,
-    `${SPECIAL_TOKENS.USER} who are you ${SPECIAL_TOKENS.NEWLINE}${SPECIAL_TOKENS.ASSISTANT} I am your friendly conversational AI assistant here to chat and help you .`,
-    `${SPECIAL_TOKENS.USER} what can you do ${SPECIAL_TOKENS.NEWLINE}${SPECIAL_TOKENS.ASSISTANT} I can converse with you , share ideas , and be fine tuned on custom chat datasets .`,
-    `${SPECIAL_TOKENS.USER} can you help me ${SPECIAL_TOKENS.NEWLINE}${SPECIAL_TOKENS.ASSISTANT} certainly ! tell me what is on your mind and I will do my best to assist .`,
-    `${SPECIAL_TOKENS.USER} thank you ${SPECIAL_TOKENS.NEWLINE}${SPECIAL_TOKENS.ASSISTANT} you are very welcome ! I am always delighted to chat with you .`,
-    `${SPECIAL_TOKENS.USER} how does this work ${SPECIAL_TOKENS.NEWLINE}${SPECIAL_TOKENS.ASSISTANT} I run locally in your browser using a small causal transformer with low memory .`
-  ];
+  const conversationalCorpus = PRETRAIN_CORPUS;
   model.learnCorpus(conversationalCorpus, 1);
 
   // Warm up neural weights with a few quick conversational pre-training steps

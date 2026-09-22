@@ -68,7 +68,7 @@ const CONVERSATIONAL_VOCAB = [
   'what', 'how', 'why', 'when', 'where', 'who', 'which', 'whose',
 
   // Politeness, affirmation, and reassurance
-  'please', 'thank', 'thanks', 'welcome', 'certainly', 'absolutely', 'definitely',
+  'please', 'thank', 'thanks', 'certainly', 'absolutely', 'definitely',
   'sure', 'yes', 'no', 'of', 'course', 'glad', 'happy', 'delighted', 'pleasure',
   'sorry', 'apologies', 'alright', 'fine', 'okay', 'great', 'good', 'wonderful',
   'excellent', 'fantastic', 'peaceful', 'calm', 'kind', 'friendly', 'gentle',
@@ -76,16 +76,16 @@ const CONVERSATIONAL_VOCAB = [
 
   // Daily life & concept nouns
   'ai', 'assistant', 'companion', 'model', 'friend', 'person', 'people', 'human',
-  'day', 'today', 'tonight', 'tomorrow', 'morning', 'time', 'moment', 'life',
+  'day', 'today', 'tonight', 'tomorrow', 'time', 'moment', 'life',
   'world', 'mind', 'heart', 'thought', 'idea', 'question', 'answer', 'story',
   'advice', 'habit', 'routine', 'task', 'goal', 'plan', 'work', 'break', 'rest',
   'nature', 'sun', 'sky', 'water', 'lake', 'earth', 'light', 'tree', 'flower',
   'book', 'music', 'sound', 'step', 'breath', 'journey', 'experience', 'wisdom',
-  'stress', 'peace', 'joy', 'smile', 'conversation', 'dialogue', 'chat',
+  'stress', 'peace', 'joy', 'smile', 'conversation', 'dialogue',
 
   // Connectors, prepositions, & qualifiers
   'and', 'or', 'but', 'so', 'because', 'although', 'while', 'since', 'if', 'then',
-  'as', 'at', 'by', 'for', 'from', 'in', 'into', 'of', 'off', 'on', 'onto', 'out',
+  'as', 'at', 'by', 'for', 'from', 'in', 'into', 'off', 'on', 'onto', 'out',
   'over', 'to', 'up', 'with', 'about', 'against', 'between', 'through', 'during',
   'before', 'after', 'above', 'below', 'under',
   'all', 'some', 'any', 'every', 'each', 'both', 'few', 'more', 'most', 'other',

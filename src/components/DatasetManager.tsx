@@ -18,21 +18,25 @@ import {
   HardDrive
 } from 'lucide-react';
 import { ConversationTurn, DatasetPreset } from '../types';
-import { PREDEFINED_DATASETS, generateExpandedChatCorpus } from '../slm/datasets';
+import { generateExpandedChatCorpus } from '../slm/datasets';
 import { defaultTokenizer } from '../slm/tokenizer';
 
 interface DatasetManagerProps {
+  /** Live dataset state, owned by App so the trainer sees every edit. */
+  datasets: DatasetPreset[];
+  onDatasetsChange: (datasets: DatasetPreset[]) => void;
   activeDatasetId: string;
   setActiveDatasetId: (id: string) => void;
   onNavigateToTrain: () => void;
 }
 
 export const DatasetManager: React.FC<DatasetManagerProps> = ({
+  datasets,
+  onDatasetsChange,
   activeDatasetId,
   setActiveDatasetId,
   onNavigateToTrain,
 }) => {
-  const [datasets, setDatasets] = useState<DatasetPreset[]>(PREDEFINED_DATASETS);
   const [newUserMsg, setNewUserMsg] = useState('');
   const [newAssistantMsg, setNewAssistantMsg] = useState('');
   const [newCategory, setNewCategory] = useState('Daily Conversation');
@@ -53,8 +57,8 @@ export const DatasetManager: React.FC<DatasetManagerProps> = ({
       category: newCategory.trim() || 'Conversation',
     };
 
-    setDatasets((prev) =>
-      prev.map((d) =>
+    onDatasetsChange(
+      datasets.map((d) =>
         d.id === currentDataset.id
           ? { ...d, turns: [...d.turns, newTurn] }
           : d
@@ -66,8 +70,8 @@ export const DatasetManager: React.FC<DatasetManagerProps> = ({
   };
 
   const handleDeleteTurn = (turnId: string) => {
-    setDatasets((prev) =>
-      prev.map((d) =>
+    onDatasetsChange(
+      datasets.map((d) =>
         d.id === currentDataset.id
           ? { ...d, turns: d.turns.filter((t) => t.id !== turnId) }
           : d
@@ -84,8 +88,8 @@ export const DatasetManager: React.FC<DatasetManagerProps> = ({
   // Expand current dataset into a big dataset of 60 turns
   const handleExpandToBigDataset = () => {
     const expanded = generateExpandedChatCorpus(currentDataset, currentDataset.turns.length + 30);
-    setDatasets((prev) =>
-      prev.map((d) =>
+    onDatasetsChange(
+      datasets.map((d) =>
         d.id === currentDataset.id
           ? { ...d, turns: expanded }
           : d
@@ -147,8 +151,8 @@ export const DatasetManager: React.FC<DatasetManagerProps> = ({
         }
 
         if (importedTurns.length > 0) {
-          setDatasets((prev) =>
-            prev.map((d) =>
+          onDatasetsChange(
+            datasets.map((d) =>
               d.id === currentDataset.id
                 ? { ...d, turns: [...d.turns, ...importedTurns] }
                 : d
