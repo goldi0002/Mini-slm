@@ -13,6 +13,7 @@
  *      trained dataset, base replies do not), and user-added turns are learned.
  *   5. resetToBase() restores exact base behavior (weights + memory layer).
  *   6. Streaming API yields valid token info.
+ *  10. Multi-turn chat keeps replying when history fills the context window.
  *
  * Run: bun scripts/diag_script.ts
  */
@@ -116,12 +117,13 @@ const GREEDY: GenerationOptions = {
   maxNewTokens: 30,
 };
 
+// Mirrors the chat playground's default sampling settings.
 const SAMPLED: GenerationOptions = {
   temperature: 0.7,
   topK: 25,
   topP: 0.85,
   repetitionPenalty: 1.15,
-  maxNewTokens: 26,
+  maxNewTokens: 40,
 };
 
 function chat(model: SmallLanguageModel, user: string, opts: GenerationOptions = GREEDY): string {
@@ -399,14 +401,18 @@ console.log(`  ${DIM}SAMPLED:${RESET} ${sampledReply}`);
 check('sampled generation stays clean (no specials / spelled chars)', textIssues(sampledReply).length === 0);
 
 // ---------------------------------------------------------------------------
-// 7. Replies do not collapse to a stub
+// 7. Replies are complete: no one-token stubs, no clauses cut in half
 // ---------------------------------------------------------------------------
 // The memory layer ranks EOS highly right after a sentence-ending period, so
 // unguarded sampling used to end some replies after a single token, producing a
 // bare "." or one-word answer. Generation holds EOS back for the first
 // MIN_REPLY_TOKENS tokens to prevent that.
+//
+// The opposite failure is what the stop rule in the memory layer fixes: a reply
+// that rambles past the sentence it completed and is then cut mid-clause by the
+// token budget. Both are measured here.
 
-section('7. Sampled replies do not collapse to a stub');
+section('7. Sampled replies are complete (not stubs, not cut mid-clause)');
 
 const stubPrompts = [
   'hello how are you doing today ?',
@@ -421,6 +427,9 @@ let stubCount = 0;
 let minReplyWords = Infinity;
 let minReplyTokens = Infinity;
 let shortestStub = '';
+let unfinishedReplies = 0;
+let shortestUnfinished = '';
+const sampledReplies = stubPrompts.length * 6;
 for (const p of stubPrompts) {
   for (let i = 0; i < 6; i++) {
     const out = model.generate(model.tokenizer.formatConversationPrompt(p), SAMPLED, true);
@@ -431,13 +440,20 @@ for (const p of stubPrompts) {
       stubCount++;
       shortestStub = out.text;
     }
+    if (!/[.!?]$/.test(out.text.trim())) {
+      unfinishedReplies++;
+      shortestUnfinished = out.text;
+    }
   }
 }
 if (shortestStub) {
   console.log(`  ${YELLOW}shortest stub:${RESET} ${JSON.stringify(shortestStub)}`);
 }
+if (shortestUnfinished) {
+  console.log(`  ${YELLOW}no final punctuation:${RESET} ${JSON.stringify(shortestUnfinished)}`);
+}
 console.log(
-  `  ${stubPrompts.length * 6} sampled replies | shortest: ${minReplyWords} words / ${minReplyTokens} tokens`
+  `  ${sampledReplies} sampled replies | shortest: ${minReplyWords} words / ${minReplyTokens} tokens | ${sampledReplies - unfinishedReplies} finish on a sentence boundary`
 );
 check(
   'no sampled reply collapses to a one-word answer',
@@ -448,6 +464,11 @@ check(
   'every reply runs past the EOS hold-back window before it can end',
   minReplyTokens >= MIN_REPLY_TOKENS,
   `shortest reply ${minReplyTokens} tokens (hold-back ${MIN_REPLY_TOKENS})`
+);
+check(
+  'replies finish on a sentence boundary rather than being cut mid-clause',
+  unfinishedReplies <= Math.ceil(sampledReplies * 0.15),
+  `${unfinishedReplies}/${sampledReplies} replies without final punctuation`
 );
 
 // ---------------------------------------------------------------------------
@@ -690,6 +711,90 @@ check(
   'the adapters measurably fit the turns they are trained on',
   loraFitAfter < loraFitBefore * 0.97,
   `${loraFitBefore.toFixed(3)} -> ${loraFitAfter.toFixed(3)}`
+);
+
+// ---------------------------------------------------------------------------
+// 10. Multi-turn chat keeps replying (context window)
+// ---------------------------------------------------------------------------
+// The playground feeds conversation history back into the prompt. With a 64
+// token window the raw prompt passes maxSeqLen after a couple of turns, and the
+// generation loop exits before its first step — which is why the chat bubble
+// went blank from the third message on. `generateChatStream` windows the prompt
+// to the context (dropping whole oldest turns) and reserves room for the reply.
+
+section('10. Multi-turn chat keeps replying inside the context window');
+
+const chatModel = initializePretrainedModel(PREDEFINED_MODELS[0]);
+const MAX_SEQ = chatModel.config.maxSeqLen;
+const transcript: Array<{ role: 'user' | 'assistant'; content: string; tokens: number }> = [];
+const chatTurns = [
+  'hello there !',
+  'how are you today ?',
+  'what should i cook for dinner ?',
+  'thanks !',
+  'can you give me advice on staying focused ?',
+  'what makes a good morning routine ?',
+];
+
+let blankTurns = 0;
+let overLongPrompts = 0;
+let uncleanReplies = 0;
+let shortestReply = Infinity;
+
+for (const text of chatTurns) {
+  // History exactly as ChatPlayground builds it: earlier turns of the
+  // conversation, capped to the last few messages.
+  const history = transcript
+    .filter((t) => t.content.trim().length > 0)
+    .slice(-4)
+    .map((t) => ({ role: t.role, content: t.content }));
+  const prompt = chatModel.tokenizer.formatConversationPrompt(text, history);
+  const promptTokens = chatModel.tokenizer.encode(prompt, true, false).length;
+  if (promptTokens > MAX_SEQ) overLongPrompts++;
+
+  const replyTokens: number[] = [];
+  for await (const info of chatModel.generateChatStream(prompt, SAMPLED, true)) {
+    replyTokens.push(info.id);
+  }
+  const reply = chatModel.tokenizer.decode(replyTokens, true);
+  const issues = textIssues(reply);
+
+  transcript.push({ role: 'user', content: text, tokens: promptTokens });
+  transcript.push({ role: 'assistant', content: reply, tokens: replyTokens.length });
+
+  shortestReply = Math.min(shortestReply, replyTokens.length);
+  if (replyTokens.length === 0 || reply.trim().length === 0) blankTurns++;
+  if (issues.length > 0) uncleanReplies++;
+
+  console.log(`  ${DIM}USER:${RESET}  ${text}`);
+  console.log(
+    `  ${DIM}BOT :${RESET}  ${reply || '(empty!)'}${issues.length ? `  ${YELLOW}[${issues.join(', ')}]${RESET}` : ''}`
+  );
+  console.log(
+    `  ${DIM}prompt ${promptTokens} tokens (raw window ${MAX_SEQ}), reply ${replyTokens.length} tokens${RESET}`
+  );
+}
+
+console.log(`  raw prompts over the window: ${overLongPrompts}/${chatTurns.length}`);
+check(
+  'no chat turn comes back blank once history fills the context window',
+  blankTurns === 0,
+  `${blankTurns}/${chatTurns.length} blank, shortest reply ${shortestReply} tokens`
+);
+check(
+  'the conversation really does outgrow the raw context window',
+  overLongPrompts > 0,
+  `${overLongPrompts}/${chatTurns.length} raw prompts over maxSeqLen ${MAX_SEQ}`
+);
+check(
+  'windowed replies are substantive (never a one-token stub)',
+  shortestReply >= MIN_REPLY_TOKENS,
+  `shortest reply ${shortestReply} tokens (hold-back ${MIN_REPLY_TOKENS})`
+);
+check(
+  'windowed replies stay clean (no raw specials / spelled chars)',
+  uncleanReplies === 0,
+  `${uncleanReplies} unclean replies`
 );
 
 // ---------------------------------------------------------------------------

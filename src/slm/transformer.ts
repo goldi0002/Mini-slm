@@ -197,8 +197,10 @@ export class SmallLanguageModel {
     this.scratchFinalNorm = new Float32Array(maxT * d);
     this.scratchLogits = new Float32Array(maxT * v);
 
-    // Initialize the statistical memory layer with baseline conversational English
-    this.memory = new NgramLanguageModel(v);
+    // Initialize the statistical memory layer with baseline conversational English.
+    // The EOS id lets it learn how utterances end, so a reply can stop at a
+    // sentence boundary instead of being cut off by the token budget.
+    this.memory = new NgramLanguageModel(v, EOS_ID);
     this.seedMemoryCorpus();
 
     // Save baseline snapshot in a single compact TypedArray
@@ -342,6 +344,86 @@ export class SmallLanguageModel {
   public learnCorpus(texts: string[], weight = 1): void {
     for (const text of texts) {
       this.memory.observe(this.tokenizer.encode(text, true, true), weight);
+    }
+  }
+
+  /**
+   * Fit an encoded prompt inside the model's context window, keeping the most
+   * recent turns.
+   *
+   * Generation keeps appending tokens to the prompt, so the prompt itself has
+   * to leave room for the reply. A multi-turn chat prompt that reached
+   * maxSeqLen makes the generation loop exit before its first step and produce
+   * nothing at all — which is what left the chat bubble blank once the
+   * conversation history grew. Oldest turns are dropped whole so the context
+   * still reads as clean user/assistant turns, and the final question is always
+   * kept.
+   */
+  private fitPromptToContext(tokens: number[], reserve: number): number[] {
+    const budget = Math.max(8, this.config.maxSeqLen - reserve);
+    if (tokens.length <= budget) return tokens;
+
+    // Turn boundaries: every prompt segment starts at a <user> or <assistant> tag.
+    const starts: number[] = [];
+    for (let i = 0; i < tokens.length; i++) {
+      if (tokens[i] === USER_ID || tokens[i] === ASSISTANT_ID) starts.push(i);
+    }
+
+    let cut = 0;
+    for (let i = starts.length - 1; i >= 0; i--) {
+      if (tokens.length - starts[i] > budget) break;
+      cut = starts[i];
+    }
+
+    const kept = cut > 0 ? tokens.slice(cut) : tokens;
+    // A single turn longer than the whole window: keep its tail, because a
+    // causal model only conditions on what comes last.
+    return kept.length > budget ? kept.slice(kept.length - budget) : kept;
+  }
+
+  /**
+   * Window a chat prompt down to the context the model can consume, leaving
+   * `reserve` tokens for the reply itself. Prompts that already fit are
+   * returned untouched.
+   */
+  private windowPrompt(prompt: string, reserve: number): string {
+    const budget = Math.max(8, this.config.maxSeqLen - reserve);
+    const tokens = this.tokenizer.encode(prompt, true, false);
+    if (tokens.length <= budget) return prompt;
+
+    // Decoding the kept ids (special tokens included) back to text keeps the
+    // <user>/<assistant> tags, so the re-encoded prompt is the same
+    // conversation minus its oldest turns.
+    return this.tokenizer.decode(this.fitPromptToContext(tokens, reserve), false);
+  }
+
+  /**
+   * Streaming generation for conversations.
+   *
+   * Identical to `generateStream`, except the prompt is first fitted to the
+   * context window (see `windowPrompt`). Use this whenever history accumulates:
+   * a prompt at or past maxSeqLen yields no tokens at all.
+   */
+  public async *generateChatStream(
+    prompt: string,
+    options: GenerationOptions,
+    useLora = true
+  ): AsyncGenerator<GeneratedTokenInfo> {
+    // The two tokens reserved on top of the reply are the reply-opening context
+    // `encodeForGeneration` appends.
+    const tokens = this.encodeForGeneration(this.windowPrompt(prompt, options.maxNewTokens + 2));
+
+    for (let step = 0; step < options.maxNewTokens; step++) {
+      if (tokens.length >= this.config.maxSeqLen) break;
+
+      const tokenInfo = this.generateNextToken(tokens, options, useLora);
+      tokens.push(tokenInfo.id);
+
+      yield tokenInfo;
+
+      if (tokenInfo.id === EOS_ID) break;
+
+      await new Promise((r) => setTimeout(r, 18));
     }
   }
 

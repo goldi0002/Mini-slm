@@ -68,7 +68,9 @@ export const PREDEFINED_MODELS: ModelConfig[] = [
     nHeads: 4,
     nLayers: 2,
     dFfn: 96,
-    maxSeqLen: 64,
+    // Context holds the reply as well as the prompt: a ~40 token answer plus
+    // the recent turns needs more than the 64 this started with.
+    maxSeqLen: 96,
     loraRank: 4,
     loraAlpha: 8,
   },
@@ -81,7 +83,7 @@ export const PREDEFINED_MODELS: ModelConfig[] = [
     nHeads: 4,
     nLayers: 2,
     dFfn: 64,
-    maxSeqLen: 48,
+    maxSeqLen: 64,
     loraRank: 4,
     loraAlpha: 8,
   },
@@ -94,7 +96,7 @@ export const PREDEFINED_MODELS: ModelConfig[] = [
     nHeads: 4,
     nLayers: 3,
     dFfn: 128,
-    maxSeqLen: 64,
+    maxSeqLen: 96,
     loraRank: 8,
     loraAlpha: 16,
   }
