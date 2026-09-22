@@ -20,6 +20,7 @@ import {
 } from 'lucide-react';
 import { ChatMessage, GenerationOptions, GeneratedTokenInfo } from '../types';
 import { SmallLanguageModel } from '../slm/transformer';
+import { defaultTokenizer } from '../slm/tokenizer';
 import { TokenInspectorModal } from './TokenInspectorModal';
 
 /** Shown when a generation turn produced no tokens at all. */
@@ -106,7 +107,7 @@ export const ChatPlayground: React.FC<ChatPlaygroundProps> = ({
   const baseModelRef = useRef<{ key: string; model: SmallLanguageModel } | null>(null);
 
   const getBaseModel = (): SmallLanguageModel => {
-    const key = `${model.config.id}:${model.config.vocabSize}`;
+    const key = `${model.config.id}:${model.config.vocabSize}:${defaultTokenizer.vocabSize}`;
     if (baseModelRef.current?.key !== key) {
       baseModelRef.current = { key, model: createBaseModel() };
     }

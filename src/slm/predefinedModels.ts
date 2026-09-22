@@ -114,7 +114,8 @@ export const PREDEFINED_MODELS: ModelConfig[] = [
  */
 export function initializePretrainedModel(config: ModelConfig): SmallLanguageModel {
   ensureVocabulary();
-  const model = new SmallLanguageModel(config, defaultTokenizer);
+  const modelConfig = { ...config, vocabSize: defaultTokenizer.vocabSize };
+  const model = new SmallLanguageModel(modelConfig, defaultTokenizer);
 
   // Pre-seed natural conversational dialogues into the memory layer
   const conversationalCorpus = PRETRAIN_CORPUS;

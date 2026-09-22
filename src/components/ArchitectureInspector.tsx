@@ -73,6 +73,8 @@ export const ArchitectureInspector: React.FC<ArchitectureInspectorProps> = ({
       wte: Array.from(weights.wte),
       wpe: Array.from(weights.wpe),
       lm_head: Array.from(weights.lm_head),
+      ln_f_gamma: Array.from(weights.ln_f_gamma),
+      ln_f_beta: Array.from(weights.ln_f_beta),
       layers: weights.layers.map((l) => ({
         q_proj: Array.from(l.q_proj),
         k_proj: Array.from(l.k_proj),
@@ -82,8 +84,14 @@ export const ArchitectureInspector: React.FC<ArchitectureInspectorProps> = ({
         lora_q_B: Array.from(l.lora_q_B),
         lora_v_A: Array.from(l.lora_v_A),
         lora_v_B: Array.from(l.lora_v_B),
+        ln1_gamma: Array.from(l.ln1_gamma),
+        ln1_beta: Array.from(l.ln1_beta),
         fc1: Array.from(l.fc1),
+        fc1_b: Array.from(l.fc1_b),
         fc2: Array.from(l.fc2),
+        fc2_b: Array.from(l.fc2_b),
+        ln2_gamma: Array.from(l.ln2_gamma),
+        ln2_beta: Array.from(l.ln2_beta),
       })),
     };
 
@@ -312,15 +320,15 @@ export const ArchitectureInspector: React.FC<ArchitectureInspectorProps> = ({
         </div>
 
         {/* Matrix Visualization */}
-        <div className="overflow-x-auto p-2 bg-slate-50/50 rounded-xl border border-slate-200">
-          <div className="inline-block min-w-full">
+        <div className="overflow-x-auto p-2 bg-slate-50/50 rounded-xl border border-slate-200 touch-pan-x">
+          <div className="inline-block min-w-max">
             {/* Horizontal Header (Keys) */}
-            <div className="flex pl-20 pb-2 text-[10px] font-mono border-b border-slate-200 mb-2">
+            <div className="flex pl-16 sm:pl-20 pb-2 text-[10px] font-mono border-b border-slate-200 mb-2">
               <div className="flex gap-1">
                 {tokenLabels.map((tok, j) => (
                   <span
                     key={j}
-                    className="w-10 text-center truncate font-medium text-slate-600"
+                    className="w-8 sm:w-10 text-center truncate font-medium text-slate-600"
                     title={`Key Token: ${tok}`}
                   >
                     {tok === ' ' ? '␣' : tok}
@@ -333,7 +341,7 @@ export const ArchitectureInspector: React.FC<ArchitectureInspectorProps> = ({
               {tokenLabels.map((qTok, i) => (
                 <div key={i} className="flex items-center text-xs">
                   <span
-                    className="w-20 shrink-0 text-right pr-2 font-mono text-[11px] truncate text-slate-700 font-medium"
+                    className="w-16 sm:w-20 shrink-0 text-right pr-2 font-mono text-[10px] sm:text-[11px] truncate text-slate-700 font-medium"
                     title={`Query Token: ${qTok}`}
                   >
                     {qTok === ' ' ? '␣' : qTok}
@@ -353,7 +361,7 @@ export const ArchitectureInspector: React.FC<ArchitectureInspectorProps> = ({
                               ? 'Causal masked (future token)'
                               : `Attn(${qTok} -> ${tokenLabels[j]}): ${(weight * 100).toFixed(1)}%`
                           }
-                          className="w-10 h-8 rounded flex items-center justify-center font-mono text-[9px] cursor-pointer transition-transform hover:scale-110"
+                          className="w-8 sm:w-10 h-7 sm:h-8 rounded flex items-center justify-center font-mono text-[8px] sm:text-[9px] cursor-pointer transition-transform hover:scale-110 select-none"
                           style={{
                             backgroundColor: isCausalMasked
                               ? '#f1f5f9'

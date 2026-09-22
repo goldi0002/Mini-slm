@@ -15,6 +15,9 @@ interface TokenInspectorModalProps {
 export const TokenInspectorModal: React.FC<TokenInspectorModalProps> = ({ tokenInfo, onClose }) => {
   if (!tokenInfo) return null;
 
+  const topTotalProb = tokenInfo.topCandidates.reduce((acc, c) => acc + c.prob, 0);
+  const remainingProb = Math.max(0, 1.0 - topTotalProb);
+
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 backdrop-blur-xs p-4 animate-in fade-in duration-150"
@@ -125,6 +128,23 @@ export const TokenInspectorModal: React.FC<TokenInspectorModalProps> = ({ tokenI
                   </div>
                 );
               })}
+
+              {remainingProb > 0.005 && (
+                <div className="p-2.5 rounded-lg border border-dashed border-slate-200 bg-slate-50/50 text-xs text-slate-500">
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="font-medium text-slate-600">Remaining tail distribution</span>
+                    <span className="font-mono font-medium text-slate-600">
+                      {(remainingProb * 100).toFixed(1)}%
+                    </span>
+                  </div>
+                  <div className="w-full h-1.5 bg-slate-100 rounded-full overflow-hidden">
+                    <div
+                      className="h-full rounded-full bg-slate-300"
+                      style={{ width: `${Math.min(100, remainingProb * 100)}%` }}
+                    />
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         </div>

@@ -169,9 +169,10 @@ export function sampleFromDistribution(
 
   // Apply repetition penalty
   const adjusted = new Float32Array(len);
+  const historySet = repetitionPenalty !== 1.0 && historyTokens.length > 0 ? new Set(historyTokens) : null;
   for (let i = 0; i < len; i++) {
     let p = probs[i];
-    if (repetitionPenalty !== 1.0 && historyTokens.includes(i)) {
+    if (historySet !== null && historySet.has(i)) {
       p = p / repetitionPenalty;
     }
     adjusted[i] = p;

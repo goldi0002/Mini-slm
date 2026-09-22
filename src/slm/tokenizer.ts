@@ -185,7 +185,7 @@ export class Tokenizer {
    */
   private splitIntoTokens(text: string): string[] {
     const rawTokens: string[] = [];
-    const regex = /<user>|<assistant>|<bos>|<eos>|<pad>|\n|[a-zA-Z]+'[a-zA-Z]+|[a-zA-Z0-9]+|[^\s\w]|\s+/g;
+    const regex = /<user>|<assistant>|<bos>|<eos>|<pad>|<unk>|\n|[a-zA-Z]+'[a-zA-Z]+|[a-zA-Z0-9]+|[^\s\w]|\s+/g;
     let match;
 
     while ((match = regex.exec(text)) !== null) {

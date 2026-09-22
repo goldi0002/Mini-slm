@@ -414,8 +414,6 @@ export class SmallLanguageModel {
     const tokens = this.encodeForGeneration(this.windowPrompt(prompt, options.maxNewTokens + 2));
 
     for (let step = 0; step < options.maxNewTokens; step++) {
-      if (tokens.length >= this.config.maxSeqLen) break;
-
       const tokenInfo = this.generateNextToken(tokens, options, useLora);
       tokens.push(tokenInfo.id);
 
@@ -511,6 +509,17 @@ export class SmallLanguageModel {
     if (this.baseMemorySnapshot) {
       this.memory.restore(this.baseMemorySnapshot);
     }
+  }
+
+  /**
+   * Returns true if any LoRA adapter weights have been updated from their zero-initialization.
+   */
+  public isFineTuned(): boolean {
+    return this.weights.layers.some(
+      (l) =>
+        l.lora_q_B.some((w) => Math.abs(w) > 1e-6) ||
+        l.lora_v_B.some((w) => Math.abs(w) > 1e-6)
+    );
   }
 
   /**
@@ -791,7 +800,10 @@ export class SmallLanguageModel {
     //    dL/dz = lm_head^T dL/dlogits at every position.
     this.gNorm.fill(0);
     for (let i = 0; i < seqLen - 1; i++) {
-      const targetToken = tokens[i + 1];
+      let targetToken = tokens[i + 1];
+      if (targetToken < 0 || targetToken >= vocabSize || !Number.isFinite(targetToken)) {
+        targetToken = UNK_ID;
+      }
       if (targetToken === PAD_ID) continue;
       const logitRow = this.scratchLogits.subarray(i * vocabSize, (i + 1) * vocabSize);
       softmax(logitRow, this.gProbs, 1.0);
@@ -977,8 +989,10 @@ export class SmallLanguageModel {
     logits: Float32Array; // [seqLen, vocabSize]
     seqLen: number;
   } {
-    const { dModel, nHeads, nLayers, dFfn, vocabSize, loraRank, loraAlpha } = this.config;
-    const seqLen = Math.min(tokens.length, this.config.maxSeqLen);
+    const { dModel, nHeads, nLayers, dFfn, vocabSize, loraRank, loraAlpha, maxSeqLen } = this.config;
+    // Sliding context window: when sequence exceeds maxSeqLen, condition on the most recent tokens
+    const activeTokens = tokens.length > maxSeqLen ? tokens.slice(tokens.length - maxSeqLen) : tokens;
+    const seqLen = activeTokens.length;
     const headDim = Math.floor(dModel / nHeads);
     const loraScale = loraRank > 0 ? loraAlpha / loraRank : 1.0;
     const cache = cacheActivations ? this.ensureActivationCache() : null;
@@ -998,15 +1012,14 @@ export class SmallLanguageModel {
     // 1. Embedding lookup: scratchX[i] = wte[tokens[i]] + wpe[i]
     //
     // An id outside the vocabulary means the tokenizer and the model were built
-    // from different vocabularies. Clamping keeps generation alive, but silently
-    // folding every such id onto the final token hides a real configuration bug,
-    // so report it once per model instance.
+    // from different vocabularies. Clamping keeps generation alive, but safely
+    // mapping out-of-bounds ids to UNK_ID preserves valid vocabulary embeddings.
     if (!this.vocabMismatchWarned) {
       for (let i = 0; i < seqLen; i++) {
-        if (tokens[i] < 0 || tokens[i] >= vocabSize) {
+        if (activeTokens[i] < 0 || activeTokens[i] >= vocabSize) {
           this.vocabMismatchWarned = true;
           console.warn(
-            `[slm] token id ${tokens[i]} at position ${i} is outside the ${vocabSize}-token ` +
+            `[slm] token id ${activeTokens[i]} at position ${i} is outside the ${vocabSize}-token ` +
               `vocabulary; the tokenizer grew after this model was built. Rebuild the model ` +
               `so the new tokens get embeddings.`
           );
@@ -1015,7 +1028,10 @@ export class SmallLanguageModel {
       }
     }
     for (let i = 0; i < seqLen; i++) {
-      const tokenId = Math.min(Math.max(0, tokens[i]), vocabSize - 1);
+      let tokenId = activeTokens[i];
+      if (tokenId < 0 || tokenId >= vocabSize || !Number.isFinite(tokenId)) {
+        tokenId = UNK_ID;
+      }
       const wteOffset = tokenId * dModel;
       const wpeOffset = i * dModel;
       const xOffset = i * dModel;
@@ -1260,7 +1276,10 @@ export class SmallLanguageModel {
     const mixed = new Float32Array(vocabSize);
 
     for (let i = 0; i < seqLen - 1; i++) {
-      const targetToken = tokens[i + 1];
+      let targetToken = tokens[i + 1];
+      if (targetToken < 0 || targetToken >= vocabSize || !Number.isFinite(targetToken)) {
+        targetToken = UNK_ID;
+      }
       if (targetToken === PAD_ID) continue;
 
       // Neural softmax at position i
@@ -1380,6 +1399,7 @@ export class SmallLanguageModel {
     // dialogue model should never spell characters out loud. Real single-letter
     // vocabulary words ("a", "i") stay available.
     const isLetterChar = (v: number) => this.tokenizer.isFallbackCharToken(v);
+    const structuralSet = new Set([PAD_ID, UNK_ID, BOS_ID, USER_ID, ASSISTANT_ID, NEWLINE_ID]);
 
     for (let v = 0; v < vocabSize; v++) {
       let p = mix * neuralProbs[v] + (1 - mix) * memoryProbs[v];
@@ -1393,7 +1413,7 @@ export class SmallLanguageModel {
       }
 
       // Never emit raw control tokens like <pad>, <unk>, <bos>, <user>, <assistant>, \n
-      if (v === PAD_ID || v === UNK_ID || v === BOS_ID || v === USER_ID || v === ASSISTANT_ID || v === NEWLINE_ID) {
+      if (structuralSet.has(v)) {
         p = 0;
       }
 
@@ -1482,13 +1502,30 @@ export class SmallLanguageModel {
    *
    * Returns [] when no user word precedes the assistant tag.
    */
+  private isPunctuationOrStructuralToken(tokenId: number): boolean {
+    if (
+      tokenId === USER_ID ||
+      tokenId === ASSISTANT_ID ||
+      tokenId === NEWLINE_ID ||
+      tokenId === BOS_ID ||
+      tokenId === PAD_ID ||
+      tokenId === EOS_ID ||
+      tokenId === UNK_ID
+    ) {
+      return true;
+    }
+    const str = this.tokenizer.getTokenString(tokenId).trim();
+    if (str.length === 0) return true;
+    return !/[a-zA-Z0-9]/.test(str);
+  }
+
   private replyOpeningContext(tokens: number[], assistantIdx: number): number[] {
     const spaceId = this.tokenizer.idOf(' ');
     if (spaceId === undefined) return [];
-    const structural = (t: number) =>
-      t === USER_ID || t === ASSISTANT_ID || t === NEWLINE_ID || t === BOS_ID || t === PAD_ID || t === EOS_ID || t === spaceId;
     for (let i = assistantIdx - 1; i >= 0; i--) {
-      if (!structural(tokens[i])) return [tokens[i], spaceId];
+      if (!this.isPunctuationOrStructuralToken(tokens[i])) {
+        return [tokens[i], spaceId];
+      }
     }
     return [];
   }
@@ -1534,12 +1571,9 @@ export class SmallLanguageModel {
       // Replay the answer fine-tuning learned for this user message.
       this.caseReply = this.memory.findCase(this.caseWords(this.userContentTokens(tokens, asstIdx)));
 
-      if (tokens.length + 2 < this.config.maxSeqLen) {
-        const opening = this.replyOpeningContext(tokens, asstIdx);
-        if (opening.length === 2) {
-          tokens.push(opening[0], opening[1]);
-          this.pendingReplyWord = opening[0];
-        }
+      const opening = this.replyOpeningContext(tokens, asstIdx);
+      if (opening.length >= 1) {
+        this.pendingReplyWord = opening[0];
       }
     }
 
@@ -1557,8 +1591,6 @@ export class SmallLanguageModel {
     const tokens = this.encodeForGeneration(prompt);
 
     for (let step = 0; step < options.maxNewTokens; step++) {
-      if (tokens.length >= this.config.maxSeqLen) break;
-
       const tokenInfo = this.generateNextToken(tokens, options, useLora);
       tokens.push(tokenInfo.id);
 
@@ -1583,8 +1615,6 @@ export class SmallLanguageModel {
     const generatedInfo: GeneratedTokenInfo[] = [];
 
     for (let step = 0; step < options.maxNewTokens; step++) {
-      if (tokens.length >= this.config.maxSeqLen) break;
-
       const tokenInfo = this.generateNextToken(tokens, options, useLora);
       tokens.push(tokenInfo.id);
       generatedInfo.push(tokenInfo);

@@ -112,6 +112,7 @@ export const DatasetManager: React.FC<DatasetManagerProps> = ({
   const handleFileUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
+    event.target.value = '';
 
     const reader = new FileReader();
     reader.onload = (e) => {

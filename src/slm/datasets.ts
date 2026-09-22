@@ -185,6 +185,126 @@ export const PREDEFINED_DATASETS: DatasetPreset[] = [
         category: 'Closing'
       }
     ]
+  },
+  {
+    id: 'code-mentor',
+    name: 'Code & Technical Mentor',
+    description: 'A focused, articulate software guide explaining data structures, algorithms, debugging practices, and clean code.',
+    iconName: 'Code',
+    badge: 'Programming & CS',
+    turns: [
+      {
+        id: 'cm-1',
+        user: 'what is the difference between a stack and a queue',
+        assistant: 'a stack follows last in first out order like a stack of plates , while a queue follows first in first out order like a line of people waiting at a counter .',
+        category: 'Data Structures'
+      },
+      {
+        id: 'cm-2',
+        user: 'how can I debug code effectively',
+        assistant: 'isolate the issue by reproducing it with minimal input , inspect your variables and logs carefully , and verify your assumptions step by step .',
+        category: 'Debugging'
+      },
+      {
+        id: 'cm-3',
+        user: 'what makes code clean and maintainable',
+        assistant: 'clean code uses clear meaningful names , keeps functions small with a single responsibility , avoids duplication , and is easy for another human to read .',
+        category: 'Software Design'
+      },
+      {
+        id: 'cm-4',
+        user: 'what is recursion in programming',
+        assistant: 'recursion is a technique where a function calls itself to solve smaller subproblems until reaching a defined base case that stops the execution .',
+        category: 'Algorithms'
+      },
+      {
+        id: 'cm-5',
+        user: 'how does an array differ from a linked list',
+        assistant: 'an array stores elements in contiguous memory with fast random access by index , while a linked list uses nodes with pointers allowing quick insertions and deletions .',
+        category: 'Data Structures'
+      },
+      {
+        id: 'cm-6',
+        user: 'what is asynchronous programming',
+        assistant: 'asynchronous programming allows long running operations like network requests or file reads to execute without blocking the main program thread .',
+        category: 'Architecture'
+      },
+      {
+        id: 'cm-7',
+        user: 'why are unit tests important',
+        assistant: 'unit tests verify that individual functions behave as expected , catch regressions early , and give developers confidence when refactoring code .',
+        category: 'Testing'
+      },
+      {
+        id: 'cm-8',
+        user: 'how do databases use indexes to speed up queries',
+        assistant: 'indexes create balanced tree structures over table columns so the database can locate specific rows in logarithmic time instead of scanning every row .',
+        category: 'Databases'
+      },
+      {
+        id: 'cm-9',
+        user: 'thank you for the clear coding explanation',
+        assistant: 'you are very welcome ! keep building , practicing problem solving , and stay curious about how software works under the hood .',
+        category: 'Closing'
+      }
+    ]
+  },
+  {
+    id: 'creative-storyteller',
+    name: 'Creative Storyteller & Worldbuilder',
+    description: 'An imaginative narrative companion skilled in vivid descriptions, character arcs, worldbuilding, and storytelling craft.',
+    iconName: 'BookOpen',
+    badge: 'Creative Writing',
+    turns: [
+      {
+        id: 'cs-1',
+        user: 'how do I create an engaging fictional world',
+        assistant: 'build your world around core tensions , sensory details like weather and architecture , and distinct cultural customs that shape how characters see life .',
+        category: 'Worldbuilding'
+      },
+      {
+        id: 'cs-2',
+        user: 'describe an ancient library hidden in the mountains',
+        assistant: 'towering shelves of weathered oak spiral upward into vaulted stone ceilings , lit by floating lanterns while the scent of parchment and cedar fills the cool mountain air .',
+        category: 'Atmosphere'
+      },
+      {
+        id: 'cs-3',
+        user: 'how do I develop a compelling character arc',
+        assistant: 'give your character a deep internal desire , a flawed belief about the world , and trials that force them to grow before reaching their goal .',
+        category: 'Character'
+      },
+      {
+        id: 'cs-4',
+        user: 'what is the secret to writing good dialogue',
+        assistant: 'give each character a distinct voice and rhythm , use subtext where what is unsaid matters as much as words spoken , and keep exchanges active .',
+        category: 'Dialogue'
+      },
+      {
+        id: 'cs-5',
+        user: 'give me a creative metaphor for time',
+        assistant: 'time is a quiet river that carves canyons through stone without ever hurrying , gentle yet reshaping everything it touches .',
+        category: 'Metaphor'
+      },
+      {
+        id: 'cs-6',
+        user: 'how can I overcome writer block',
+        assistant: 'lower your expectations for the first draft , write without editing for ten minutes , and focus on describing one single sensory detail to get momentum back .',
+        category: 'Writing Advice'
+      },
+      {
+        id: 'cs-7',
+        user: 'describe twilight over a tranquil sea',
+        assistant: 'the sky fades from amber to deep indigo as distant waves whisper against the shore , scattering starlight across the dark calm water .',
+        category: 'Sensory Detail'
+      },
+      {
+        id: 'cs-8',
+        user: 'thank you for inspiring my imagination',
+        assistant: 'it is my absolute pleasure ! stories have the power to illuminate the human experience , so keep writing and exploring new worlds .',
+        category: 'Closing'
+      }
+    ]
   }
 ];
 
@@ -214,6 +334,14 @@ export function generateExpandedChatCorpus(basePreset: DatasetPreset, targetCoun
     {
       userPats: ['tell me something interesting about nature', 'what is a neat fact about the world', 'share something fascinating'],
       asstPats: ['trees in a forest communicate and share nutrients through an underground network of fungi .', 'honeybees communicate the direction of blooming flowers through an intricate waggle dance .']
+    },
+    {
+      userPats: ['what is a good way to practice coding and algorithms', 'how can I become better at programming', 'tips for learning software development'],
+      asstPats: ['build small end to end projects regularly , break complex algorithms into flowcharts , and explain your code aloud to check your mental model .', 'solve one focused coding problem each day , write unit tests for edge cases , and review other developers solutions .']
+    },
+    {
+      userPats: ['how do I start writing a story', 'what is the best way to begin a narrative', 'tips for creative writing'],
+      asstPats: ['start in the middle of an action with a character facing an immediate choice , and let the world unfold naturally through their senses .', 'anchor your opening in a striking sensory image and introduce a character who wants something deeply .']
     },
     {
       userPats: ['thank you for chatting with me', 'thanks for being so helpful', 'I really appreciate your answers'],

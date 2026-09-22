@@ -81,7 +81,9 @@ export default function App() {
     );
 
     if (learned > 0) {
-      setModel(initializePretrainedModel(selectedModelConfig));
+      const updatedConfig = { ...selectedModelConfig, vocabSize: defaultTokenizer.vocabSize };
+      setSelectedModelConfig(updatedConfig);
+      setModel(initializePretrainedModel(updatedConfig));
       syncResetState();
     }
   };

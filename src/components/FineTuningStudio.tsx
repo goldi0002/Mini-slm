@@ -15,7 +15,11 @@ import {
   TrendingDown, 
   HardDrive,
   Database,
-  ArrowRight
+  ArrowRight,
+  Activity,
+  Check,
+  Send,
+  HelpCircle
 } from 'lucide-react';
 import { 
   TrainingHyperparams, 
@@ -23,6 +27,24 @@ import {
   TrainingState,
   DatasetPreset
 } from '../types';
+
+export interface EvaluationResult {
+  turnId: string;
+  category: string;
+  prompt: string;
+  target: string;
+  predicted: string;
+  overlap: number;
+  isPassed: boolean;
+}
+
+export interface EvaluationSummary {
+  totalTurns: number;
+  passedTurns: number;
+  avgOverlap: number;
+  avgLoss: number;
+  results: EvaluationResult[];
+}
 import { SmallLanguageModel } from '../slm/transformer';
 import { generateExpandedChatCorpus } from '../slm/datasets';
 import { SPECIAL_TOKENS } from '../slm/tokenizer';
@@ -70,6 +92,22 @@ export const FineTuningStudio: React.FC<FineTuningStudioProps> = ({
     currentPerplexity: 0,
     sampleOutputs: [],
   });
+
+  const [evalState, setEvalState] = useState<{
+    isEvaluating: boolean;
+    summary: EvaluationSummary | null;
+  }>({
+    isEvaluating: false,
+    summary: null,
+  });
+  const [customTestPrompt, setCustomTestPrompt] = useState('');
+  const [customTestOutput, setCustomTestOutput] = useState<{
+    prompt: string;
+    response: string;
+    latencyMs: number;
+    tokensCount: number;
+  } | null>(null);
+  const [isTestingPrompt, setIsTestingPrompt] = useState(false);
 
   const isTrainingRef = useRef(false);
   const isPausedRef = useRef(false);
@@ -181,12 +219,12 @@ export const FineTuningStudio: React.FC<FineTuningStudioProps> = ({
         }
 
         // Keep browser UI interactive
-        if (dataset.length > 50) {
-          if (stepCount % 4 === 0) await new Promise((r) => setTimeout(r, 8));
-        } else {
-          await new Promise((r) => setTimeout(r, 14));
+        if (stepCount % 2 === 0) {
+          await new Promise((r) => setTimeout(r, 8));
         }
       }
+
+      if (!isTrainingRef.current) break;
 
       // Generate live sample completion at the end of each epoch
       const sampleGeneration = model.generate(
@@ -214,6 +252,7 @@ export const FineTuningStudio: React.FC<FineTuningStudioProps> = ({
       }));
     }
 
+    const completedSuccessfully = isTrainingRef.current && stepCount === totalSteps;
     isTrainingRef.current = false;
     setTrainingState((prev) => ({
       ...prev,
@@ -221,7 +260,9 @@ export const FineTuningStudio: React.FC<FineTuningStudioProps> = ({
       isPaused: false,
     }));
 
-    onTrainingComplete(selectedPreset.name);
+    if (completedSuccessfully) {
+      onTrainingComplete(selectedPreset.name);
+    }
   };
 
   const pauseTraining = () => {
@@ -253,6 +294,119 @@ export const FineTuningStudio: React.FC<FineTuningStudioProps> = ({
       currentPerplexity: 0,
       sampleOutputs: [],
     });
+    setEvalState({ isEvaluating: false, summary: null });
+    setCustomTestOutput(null);
+  };
+
+  const runDatasetEvaluation = async () => {
+    if (evalState.isEvaluating || trainingState.isTraining) return;
+    setEvalState((prev) => ({ ...prev, isEvaluating: true }));
+
+    // Yield to let the spinner render
+    await new Promise((r) => setTimeout(r, 20));
+
+    try {
+      const turns = selectedPreset.turns;
+      const results: EvaluationResult[] = [];
+      let totalOverlap = 0;
+      let totalLoss = 0;
+      let passedCount = 0;
+      const V = model.config.vocabSize;
+
+      for (const turn of turns) {
+        const prompt = model.tokenizer.formatConversationPrompt(turn.user);
+        const res = model.generate(prompt, {
+          temperature: 0.2,
+          topK: 10,
+          topP: 0.9,
+          repetitionPenalty: 1.1,
+          maxNewTokens: 35,
+        });
+
+        // Calculate word overlap
+        const targetWords = turn.assistant.toLowerCase().replace(/[^a-z0-9\s]/g, '').split(/\s+/).filter(Boolean);
+        const predWords = res.text.toLowerCase().replace(/[^a-z0-9\s]/g, '').split(/\s+/).filter(Boolean);
+        const targetSet = new Set(targetWords);
+        let matchCount = 0;
+        for (const w of predWords) {
+          if (targetSet.has(w)) matchCount++;
+        }
+        const overlap = targetWords.length > 0 ? (matchCount / targetWords.length) * 100 : 0;
+        totalOverlap += overlap;
+        const isPassed = overlap >= 40;
+        if (isPassed) passedCount++;
+
+        // Cross-entropy loss for this turn
+        const formatted = `${SPECIAL_TOKENS.USER} ${turn.user} ${SPECIAL_TOKENS.NEWLINE}${SPECIAL_TOKENS.ASSISTANT} ${turn.assistant}`;
+        const tokens = model.tokenizer.encode(formatted, true, true);
+        const { logits, seqLen } = model.forward(tokens, true);
+        let turnLoss = 0;
+        let turnTokens = 0;
+        for (let i = 0; i < seqLen - 1; i++) {
+          const target = tokens[i + 1];
+          if (target === 0) continue;
+          const row = logits.subarray(i * V, (i + 1) * V);
+          let maxLogit = -Infinity;
+          for (let j = 0; j < V; j++) if (row[j] > maxLogit) maxLogit = row[j];
+          let sumExp = 0;
+          for (let j = 0; j < V; j++) sumExp += Math.exp(row[j] - maxLogit);
+          const p = Math.max(1e-7, Math.exp(row[target] - maxLogit) / sumExp);
+          turnLoss += -Math.log(p);
+          turnTokens++;
+        }
+        totalLoss += turnTokens > 0 ? turnLoss / turnTokens : 0;
+
+        results.push({
+          turnId: turn.id,
+          category: turn.category || 'General',
+          prompt: turn.user,
+          target: turn.assistant,
+          predicted: res.text,
+          overlap: parseFloat(overlap.toFixed(1)),
+          isPassed,
+        });
+      }
+
+      setEvalState({
+        isEvaluating: false,
+        summary: {
+          totalTurns: turns.length,
+          passedTurns: passedCount,
+          avgOverlap: parseFloat((totalOverlap / turns.length).toFixed(1)),
+          avgLoss: parseFloat((totalLoss / turns.length).toFixed(3)),
+          results,
+        },
+      });
+    } catch (err) {
+      console.error('Dataset evaluation failed:', err);
+      setEvalState((prev) => ({ ...prev, isEvaluating: false }));
+    }
+  };
+
+  const handleTestSinglePrompt = (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    const q = customTestPrompt.trim();
+    if (!q || isTestingPrompt) return;
+
+    setIsTestingPrompt(true);
+    const start = performance.now();
+    const prompt = model.tokenizer.formatConversationPrompt(q);
+    const res = model.generate(prompt, {
+      temperature: 0.3,
+      topK: 12,
+      topP: 0.85,
+      repetitionPenalty: 1.15,
+      maxNewTokens: 40,
+    });
+    const latency = Math.round(performance.now() - start);
+
+    setCustomTestOutput({
+      prompt: q,
+      response: res.text || 'No response generated.',
+      latencyMs: latency,
+      tokensCount: res.tokens.length,
+    });
+    setIsTestingPrompt(false);
   };
 
   // SVG Chart Dimensions & Computations
@@ -676,6 +830,185 @@ export const FineTuningStudio: React.FC<FineTuningStudioProps> = ({
                 <p className="text-xs text-slate-400 py-3 text-center">
                   Live responses generated after each epoch will appear here as the model learns.
                 </p>
+              )}
+            </div>
+          </div>
+
+          {/* Trained Data Verification & Evaluation Suite */}
+          <div className="bg-white border border-slate-200 rounded-xl p-4 sm:p-5 shadow-2xs space-y-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-3 border-b border-slate-100">
+              <div>
+                <h3 className="text-xs font-bold text-slate-900 uppercase tracking-wider flex items-center gap-1.5">
+                  <Activity className="w-3.5 h-3.5 text-indigo-600" />
+                  <span>Trained Data Verification & Accuracy Suite</span>
+                </h3>
+                <p className="text-[11px] text-slate-500 mt-0.5">
+                  Evaluate current model performance against all {selectedPreset.turns.length} ground-truth turns in{' '}
+                  <span className="font-semibold text-slate-700">"{selectedPreset.name}"</span>.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={runDatasetEvaluation}
+                disabled={evalState.isEvaluating || trainingState.isTraining}
+                className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
+                  evalState.isEvaluating || trainingState.isTraining
+                    ? 'bg-slate-100 text-slate-400 cursor-not-allowed border border-slate-200'
+                    : 'bg-indigo-600 hover:bg-indigo-700 text-white shadow-xs'
+                }`}
+              >
+                {evalState.isEvaluating ? (
+                  <>
+                    <span className="w-3 h-3 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                    <span>Evaluating Turns...</span>
+                  </>
+                ) : (
+                  <>
+                    <Check className="w-3.5 h-3.5" />
+                    <span>Run Full Evaluation</span>
+                  </>
+                )}
+              </button>
+            </div>
+
+            {/* Scorecard Strip */}
+            {evalState.summary ? (
+              <div className="space-y-4">
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+                  <div className="bg-slate-50 border border-slate-200 rounded-lg p-3">
+                    <span className="text-[11px] font-medium text-slate-500 block">Avg Word Match</span>
+                    <span className="text-lg font-bold text-slate-900">
+                      {evalState.summary.avgOverlap}%
+                    </span>
+                  </div>
+                  <div className="bg-slate-50 border border-slate-200 rounded-lg p-3">
+                    <span className="text-[11px] font-medium text-slate-500 block">Turns Passed</span>
+                    <div className="flex items-baseline gap-1">
+                      <span className="text-lg font-bold text-emerald-700">
+                        {evalState.summary.passedTurns}
+                      </span>
+                      <span className="text-xs text-slate-400">/ {evalState.summary.totalTurns}</span>
+                    </div>
+                  </div>
+                  <div className="bg-slate-50 border border-slate-200 rounded-lg p-3">
+                    <span className="text-[11px] font-medium text-slate-500 block">Cross-Entropy Loss</span>
+                    <span className="text-lg font-bold text-slate-900 font-mono">
+                      {evalState.summary.avgLoss}
+                    </span>
+                  </div>
+                  <div className="bg-slate-50 border border-slate-200 rounded-lg p-3">
+                    <span className="text-[11px] font-medium text-slate-500 block">Model Status</span>
+                    {(() => {
+                      const isAdapted = model.isFineTuned();
+                      return (
+                        <span className={`inline-block text-xs font-semibold px-2 py-0.5 mt-0.5 rounded ${
+                          isAdapted
+                            ? 'bg-indigo-50 text-indigo-700 border border-indigo-200'
+                            : 'bg-amber-50 text-amber-700 border border-amber-200'
+                        }`}>
+                          {isAdapted ? 'LoRA Adapted' : 'Base Pretrained'}
+                        </span>
+                      );
+                    })()}
+                  </div>
+                </div>
+
+                {/* Per-Turn Comparison Table */}
+                <div className="space-y-2 max-h-72 overflow-y-auto pr-1">
+                  {evalState.summary.results.map((res, idx) => (
+                    <div
+                      key={res.turnId}
+                      className="p-3 bg-slate-50 rounded-lg border border-slate-200 text-xs space-y-1.5"
+                    >
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <span className="font-semibold text-slate-700 text-[11px]">
+                            Turn {idx + 1}
+                          </span>
+                          <span className="text-[10px] px-1.5 py-0.5 bg-slate-200 text-slate-600 rounded">
+                            {res.category}
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-[11px] font-semibold text-slate-600">
+                            {res.overlap}% overlap
+                          </span>
+                          <span
+                            className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${
+                              res.overlap >= 60
+                                ? 'bg-emerald-100 text-emerald-800'
+                                : res.overlap >= 40
+                                ? 'bg-indigo-100 text-indigo-800'
+                                : 'bg-amber-100 text-amber-800'
+                            }`}
+                          >
+                            {res.isPassed ? 'PASS' : 'PARTIAL'}
+                          </span>
+                        </div>
+                      </div>
+
+                      <div className="text-[11px] text-slate-600">
+                        <span className="font-semibold text-slate-800">Q: </span>
+                        {res.prompt}
+                      </div>
+
+                      <div className="text-[11px] text-slate-500 pl-2 border-l-2 border-slate-300">
+                        <span className="font-semibold text-slate-600">Expected: </span>
+                        {res.target}
+                      </div>
+
+                      <div className="text-[11px] text-indigo-950 font-medium pl-2 border-l-2 border-indigo-400 bg-white/60 py-1 rounded-r">
+                        <span className="font-semibold text-indigo-700">Model Output: </span>
+                        {res.predicted}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : (
+              <div className="p-4 bg-slate-50 rounded-lg border border-slate-200 text-center space-y-1">
+                <p className="text-xs text-slate-600 font-medium">
+                  Click "Run Full Evaluation" to test the model across all turns of the current dataset.
+                </p>
+                <p className="text-[11px] text-slate-400">
+                  Measures lexical target overlap %, cross-entropy loss, and shows side-by-side completions.
+                </p>
+              </div>
+            )}
+
+            {/* Quick Single Prompt Playground Tester */}
+            <div className="pt-3 border-t border-slate-100 space-y-2">
+              <span className="text-[11px] font-bold text-slate-700 uppercase tracking-wider block">
+                Quick Single-Prompt Tester
+              </span>
+              <form onSubmit={handleTestSinglePrompt} className="flex gap-2">
+                <input
+                  type="text"
+                  value={customTestPrompt}
+                  onChange={(e) => setCustomTestPrompt(e.target.value)}
+                  placeholder={`Try e.g., "${selectedPreset.turns[0]?.user || 'hello how are you'}"`}
+                  className="flex-1 px-3 py-1.5 text-xs bg-slate-50 border border-slate-200 rounded-lg text-slate-800 placeholder-slate-400 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                />
+                <button
+                  type="submit"
+                  disabled={!customTestPrompt.trim() || isTestingPrompt}
+                  className="px-3 py-1.5 bg-slate-900 hover:bg-slate-800 text-white rounded-lg text-xs font-semibold flex items-center gap-1 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  <Send className="w-3 h-3" />
+                  <span>Test</span>
+                </button>
+              </form>
+
+              {customTestOutput && (
+                <div className="p-3 bg-indigo-50/50 rounded-lg border border-indigo-100 text-xs space-y-1">
+                  <div className="flex items-center justify-between text-[10px] text-slate-500">
+                    <span className="font-semibold text-slate-700">Q: "{customTestOutput.prompt}"</span>
+                    <span>{customTestOutput.latencyMs}ms ({customTestOutput.tokensCount} tokens)</span>
+                  </div>
+                  <p className="text-indigo-950 font-medium pl-2 border-l-2 border-indigo-400">
+                    {customTestOutput.response}
+                  </p>
+                </div>
               )}
             </div>
           </div>
