@@ -15,6 +15,7 @@ import {
   HardDrive
 } from 'lucide-react';
 import { ModelConfig } from '../types';
+import { defaultTokenizer } from '../slm/tokenizer';
 
 interface HeaderProps {
   models: ModelConfig[];
@@ -99,6 +100,21 @@ export const Header: React.FC<HeaderProps> = ({
               <span className="text-slate-400">Params:</span>
               <span className="font-mono font-semibold text-slate-800">
                 {paramStats.total.toLocaleString()}
+              </span>
+            </div>
+
+            <div
+              className="hidden xl:flex items-center gap-2 text-xs bg-slate-50 border border-slate-200 rounded-lg px-2.5 py-1 text-slate-600"
+              title={`Hybrid word + BPE subword vocabulary: ${defaultTokenizer.vocabSize.toLocaleString()} tokens, ${defaultTokenizer.bpeMergeCount} learned merges. Unseen words compose from subword pieces instead of being spelled out.`}
+            >
+              <span className="text-slate-400">Vocab:</span>
+              <span className="font-mono font-semibold text-slate-800">
+                {defaultTokenizer.vocabSize.toLocaleString()}
+              </span>
+              <span className="text-slate-300">|</span>
+              <span className="text-slate-400">BPE:</span>
+              <span className="font-mono font-semibold text-slate-800">
+                {defaultTokenizer.bpeMergeCount}
               </span>
             </div>
 

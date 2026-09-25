@@ -155,8 +155,27 @@ export function softmax(logits: Float32Array, out: Float32Array, temp = 1.0): vo
   }
 }
 
+export interface SamplingResult {
+  chosenId: number;
+  /**
+   * The most likely candidates with their probability in distribution space.
+   * These are the model's own probabilities (after the repetition penalty),
+   * normalized by the full distribution mass — NOT by the top-k/top-p subset.
+   * Re-normalizing over the filtered subset inflates them whenever the nucleus
+   * cuts the tail (top candidates summing past 100%) and contradicts the
+   * uninflated probability reported for the sampled token.
+   */
+  candidates: Array<{ id: number; prob: number }>;
+  /** Total mass of the unfiltered distribution the candidates were drawn from. */
+  totalMass: number;
+}
+
 /**
- * Sample an index from a probability distribution
+ * Sample an index from a probability distribution.
+ *
+ * Top-k and top-p decide where sampling may draw from; the returned candidate
+ * list always reports true distribution-space probabilities, so the inspector
+ * UI never shows an inflated nucleus.
  */
 export function sampleFromDistribution(
   probs: Float32Array,
@@ -164,7 +183,7 @@ export function sampleFromDistribution(
   topP = 0.9,
   repetitionPenalty = 1.0,
   historyTokens: number[] = []
-): { chosenId: number; candidates: Array<{ id: number; prob: number }> } {
+): SamplingResult {
   const len = probs.length;
 
   // Apply repetition penalty
@@ -189,10 +208,21 @@ export function sampleFromDistribution(
   // Sort descending
   pairs.sort((a, b) => b.prob - a.prob);
 
+  // Total mass of the whole (repetition-adjusted) distribution. Every candidate
+  // probability handed back to the UI is normalized by this, never by the
+  // filtered subset.
+  let totalMass = 0;
+  for (const p of pairs) totalMass += p.prob;
+  const toCandidates = (list: Array<{ id: number; prob: number }>) =>
+    totalMass > 0 ? list.map((c) => ({ id: c.id, prob: c.prob / totalMass })) : list;
+
   // Apply Top-K
   const kFiltered = topK > 0 ? pairs.slice(0, topK) : pairs;
 
-  // Apply Top-P (Nucleus)
+  // Apply Top-P (Nucleus). The filter decides *where* sampling may draw from;
+  // it must not inflate the probabilities reported for those candidates, or the
+  // inspected nucleus would contradict both the sampled token's own likelihood
+  // and the tail mass the modal derives from it.
   let cumulative = 0;
   const pFiltered: Array<{ id: number; prob: number }> = [];
   for (const pair of kFiltered) {
@@ -201,11 +231,11 @@ export function sampleFromDistribution(
     if (cumulative >= topP) break;
   }
 
-  // Re-normalize probabilities
+  // Only the sampling draw itself re-normalizes over the nucleus.
   let sumP = 0;
   for (const p of pFiltered) sumP += p.prob;
   if (sumP <= 0) {
-    return { chosenId: pairs[0]?.id ?? 0, candidates: pairs.slice(0, 5) };
+    return { chosenId: pairs[0]?.id ?? 0, candidates: toCandidates(pairs.slice(0, 5)), totalMass };
   }
 
   // Random sample
@@ -223,6 +253,7 @@ export function sampleFromDistribution(
 
   return {
     chosenId,
-    candidates: pairs.slice(0, 5).map(c => ({ id: c.id, prob: c.prob / sumP }))
+    candidates: toCandidates(pairs.slice(0, 5)),
+    totalMass
   };
 }

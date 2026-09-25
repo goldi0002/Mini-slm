@@ -19,7 +19,8 @@ import {
   Activity,
   Check,
   Send,
-  HelpCircle
+  HelpCircle,
+  TriangleAlert
 } from 'lucide-react';
 import { 
   TrainingHyperparams, 
@@ -48,6 +49,98 @@ export interface EvaluationSummary {
 import { SmallLanguageModel } from '../slm/transformer';
 import { generateExpandedChatCorpus } from '../slm/datasets';
 import { SPECIAL_TOKENS } from '../slm/tokenizer';
+import { ConversationTurn } from '../types';
+
+/**
+ * Score one dataset turn against the model: the generated reply, its word
+ * overlap with the ground-truth answer, and the turn's cross-entropy loss.
+ *
+ * `useLora` must be the adaptation mode training ran with. Evaluating a full
+ * retrain with the LoRA adapters enabled (or a LoRA run with them disabled)
+ * measures a different network than the one that was just trained.
+ */
+export function evaluateTurn(
+  model: SmallLanguageModel,
+  turn: ConversationTurn,
+  useLora: boolean
+): { predicted: string; overlap: number; isPassed: boolean; loss: number } {
+  const prompt = model.tokenizer.formatConversationPrompt(turn.user);
+  const res = model.generate(
+    prompt,
+    {
+      temperature: 0.2,
+      topK: 10,
+      topP: 0.9,
+      repetitionPenalty: 1.1,
+      maxNewTokens: 35,
+    },
+    useLora
+  );
+
+  // Word overlap against the target answer
+  const targetWords = turn.assistant.toLowerCase().replace(/[^a-z0-9\s]/g, '').split(/\s+/).filter(Boolean);
+  const predWords = res.text.toLowerCase().replace(/[^a-z0-9\s]/g, '').split(/\s+/).filter(Boolean);
+  const targetSet = new Set(targetWords);
+  let matchCount = 0;
+  for (const w of predWords) {
+    if (targetSet.has(w)) matchCount++;
+  }
+  const overlap = targetWords.length > 0 ? (matchCount / targetWords.length) * 100 : 0;
+
+  // Cross-entropy loss for this turn, under the same adaptation mode
+  const V = model.config.vocabSize;
+  const formatted = `${SPECIAL_TOKENS.USER} ${turn.user} ${SPECIAL_TOKENS.NEWLINE}${SPECIAL_TOKENS.ASSISTANT} ${turn.assistant}`;
+  const tokens = model.tokenizer.encode(formatted, true, true);
+  const { logits, seqLen } = model.forward(tokens, useLora);
+  let turnLoss = 0;
+  let turnTokens = 0;
+  for (let i = 0; i < seqLen - 1; i++) {
+    const target = tokens[i + 1];
+    if (target === 0) continue;
+    const row = logits.subarray(i * V, (i + 1) * V);
+    let maxLogit = -Infinity;
+    for (let j = 0; j < V; j++) if (row[j] > maxLogit) maxLogit = row[j];
+    let sumExp = 0;
+    for (let j = 0; j < V; j++) sumExp += Math.exp(row[j] - maxLogit);
+    const p = Math.max(1e-7, Math.exp(row[target] - maxLogit) / sumExp);
+    turnLoss += -Math.log(p);
+    turnTokens++;
+  }
+
+  return {
+    predicted: res.text,
+    overlap,
+    isPassed: overlap >= 40,
+    loss: turnTokens > 0 ? turnLoss / turnTokens : 0,
+  };
+}
+
+/**
+ * Full-mode epoch count from which the studio flags the run as a long full
+ * retrain — the point where the extra epochs stop paying for themselves.
+ *
+ * The threshold comes from measurement, not taste: `scripts/diag_script.ts`
+ * section 12 scores both adaptation modes on sentences held out of training,
+ * under several weight initialisations. Both modes cut held-out loss by more
+ * than a nat, but they land level with each other, while a full retrain updates
+ * every weight in the network instead of a rank-r adapter. So past a short
+ * warm-in, the epochs are spent for no measured gain.
+ */
+export const FULL_MODE_ADVISORY_EPOCHS = 4;
+
+/**
+ * Advisory for a hyperparameter set that is expected to cost the user more
+ * than it returns, or `null` when the configuration is in the safe regime.
+ *
+ * Returned as data (not rendered text) so the check is unit-testable and the
+ * studio can render it wherever it fits.
+ */
+export function trainingRegimeAdvisory(hyperparams: TrainingHyperparams): string | null {
+  if (!hyperparams.loraMode && hyperparams.epochs >= FULL_MODE_ADVISORY_EPOCHS) {
+    return `Full retraining for ${hyperparams.epochs} epochs rewrites every weight in the network, but measured the same held-out loss as the LoRA adapter — the extra epochs mostly refit the turns it has already seen. Keep a full retrain short (1–3 epochs), or use LoRA.`;
+  }
+  return null;
+}
 
 interface FineTuningStudioProps {
   model: SmallLanguageModel;
@@ -226,7 +319,8 @@ export const FineTuningStudio: React.FC<FineTuningStudioProps> = ({
 
       if (!isTrainingRef.current) break;
 
-      // Generate live sample completion at the end of each epoch
+      // Generate a live sample completion at the end of each epoch, under the
+      // same adaptation mode the epoch trained with.
       const sampleGeneration = model.generate(
         evalPrompt,
         {
@@ -236,7 +330,7 @@ export const FineTuningStudio: React.FC<FineTuningStudioProps> = ({
           repetitionPenalty: 1.1,
           maxNewTokens: 20,
         },
-        true
+        hyperparams.loraMode
       );
 
       setTrainingState((prev) => ({
@@ -311,59 +405,23 @@ export const FineTuningStudio: React.FC<FineTuningStudioProps> = ({
       let totalOverlap = 0;
       let totalLoss = 0;
       let passedCount = 0;
-      const V = model.config.vocabSize;
 
       for (const turn of turns) {
-        const prompt = model.tokenizer.formatConversationPrompt(turn.user);
-        const res = model.generate(prompt, {
-          temperature: 0.2,
-          topK: 10,
-          topP: 0.9,
-          repetitionPenalty: 1.1,
-          maxNewTokens: 35,
-        });
-
-        // Calculate word overlap
-        const targetWords = turn.assistant.toLowerCase().replace(/[^a-z0-9\s]/g, '').split(/\s+/).filter(Boolean);
-        const predWords = res.text.toLowerCase().replace(/[^a-z0-9\s]/g, '').split(/\s+/).filter(Boolean);
-        const targetSet = new Set(targetWords);
-        let matchCount = 0;
-        for (const w of predWords) {
-          if (targetSet.has(w)) matchCount++;
-        }
-        const overlap = targetWords.length > 0 ? (matchCount / targetWords.length) * 100 : 0;
-        totalOverlap += overlap;
-        const isPassed = overlap >= 40;
-        if (isPassed) passedCount++;
-
-        // Cross-entropy loss for this turn
-        const formatted = `${SPECIAL_TOKENS.USER} ${turn.user} ${SPECIAL_TOKENS.NEWLINE}${SPECIAL_TOKENS.ASSISTANT} ${turn.assistant}`;
-        const tokens = model.tokenizer.encode(formatted, true, true);
-        const { logits, seqLen } = model.forward(tokens, true);
-        let turnLoss = 0;
-        let turnTokens = 0;
-        for (let i = 0; i < seqLen - 1; i++) {
-          const target = tokens[i + 1];
-          if (target === 0) continue;
-          const row = logits.subarray(i * V, (i + 1) * V);
-          let maxLogit = -Infinity;
-          for (let j = 0; j < V; j++) if (row[j] > maxLogit) maxLogit = row[j];
-          let sumExp = 0;
-          for (let j = 0; j < V; j++) sumExp += Math.exp(row[j] - maxLogit);
-          const p = Math.max(1e-7, Math.exp(row[target] - maxLogit) / sumExp);
-          turnLoss += -Math.log(p);
-          turnTokens++;
-        }
-        totalLoss += turnTokens > 0 ? turnLoss / turnTokens : 0;
+        // Mirror the adaptation mode training used, so the scorecard describes
+        // the network that was actually adapted (LoRA adapters vs. full retrain).
+        const evaluated = evaluateTurn(model, turn, hyperparams.loraMode);
+        totalOverlap += evaluated.overlap;
+        if (evaluated.isPassed) passedCount++;
+        totalLoss += evaluated.loss;
 
         results.push({
           turnId: turn.id,
           category: turn.category || 'General',
           prompt: turn.user,
           target: turn.assistant,
-          predicted: res.text,
-          overlap: parseFloat(overlap.toFixed(1)),
-          isPassed,
+          predicted: evaluated.predicted,
+          overlap: parseFloat(evaluated.overlap.toFixed(1)),
+          isPassed: evaluated.isPassed,
         });
       }
 
@@ -391,13 +449,17 @@ export const FineTuningStudio: React.FC<FineTuningStudioProps> = ({
     setIsTestingPrompt(true);
     const start = performance.now();
     const prompt = model.tokenizer.formatConversationPrompt(q);
-    const res = model.generate(prompt, {
-      temperature: 0.3,
-      topK: 12,
-      topP: 0.85,
-      repetitionPenalty: 1.15,
-      maxNewTokens: 40,
-    });
+    const res = model.generate(
+      prompt,
+      {
+        temperature: 0.3,
+        topK: 12,
+        topP: 0.85,
+        repetitionPenalty: 1.15,
+        maxNewTokens: 40,
+      },
+      hyperparams.loraMode
+    );
     const latency = Math.round(performance.now() - start);
 
     setCustomTestOutput({
@@ -429,6 +491,8 @@ export const FineTuningStudio: React.FC<FineTuningStudioProps> = ({
   };
 
   const polylinePoints = points.map((p, idx) => getSvgCoordinates(p, idx)).join(' ');
+
+  const regimeAdvisory = trainingRegimeAdvisory(hyperparams);
 
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4 space-y-4">
@@ -631,6 +695,13 @@ export const FineTuningStudio: React.FC<FineTuningStudioProps> = ({
                 </button>
               </div>
             </div>
+
+            {regimeAdvisory && (
+              <div className="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 p-2.5 text-[11px] leading-relaxed text-amber-800">
+                <TriangleAlert className="w-3.5 h-3.5 mt-0.5 flex-shrink-0 text-amber-600" />
+                <span>{regimeAdvisory}</span>
+              </div>
+            )}
 
             <div>
               <div className="flex justify-between text-xs font-medium text-slate-700 mb-1">

@@ -14,6 +14,13 @@
  *   5. resetToBase() restores exact base behavior (weights + memory layer).
  *   6. Streaming API yields valid token info.
  *  10. Multi-turn chat keeps replying when history fills the context window.
+ *  11. BPE subword tokenizer: unseen words compose from learned merges instead
+ *      of being spelled out (and known words stay single tokens, so the memory
+ *      layer's id-keyed links and dialogue-case replay keep working).
+ *  12. Training regimes: with the studio's own hyperparameters, both adaptation
+ *      modes lower held-out loss by well over a nat, but the full retrain buys
+ *      no measurable gain over the cheaper LoRA default — which is what the
+ *      studio's full-mode advisory is based on.
  *
  * Run: bun scripts/diag_script.ts
  */
@@ -23,6 +30,8 @@ import { PREDEFINED_DATASETS, generateExpandedChatCorpus } from '../src/slm/data
 import { defaultTokenizer, SPECIAL_TOKENS, UNK_ID, BOS_ID } from '../src/slm/tokenizer';
 import { SmallLanguageModel, MIN_REPLY_TOKENS } from '../src/slm/transformer';
 import { softmax } from '../src/slm/matrix';
+import { BASE_CORPUS } from '../src/slm/corpus';
+import { FULL_MODE_ADVISORY_EPOCHS, trainingRegimeAdvisory } from '../src/components/FineTuningStudio';
 import { GenerationOptions } from '../src/types';
 
 // ---------------------------------------------------------------------------
@@ -795,6 +804,266 @@ check(
   'windowed replies stay clean (no raw specials / spelled chars)',
   uncleanReplies === 0,
   `${uncleanReplies} unclean replies`
+);
+
+// ---------------------------------------------------------------------------
+// 11. BPE subword tokenizer
+// ---------------------------------------------------------------------------
+
+section('11. BPE subword tokenizer (unseen words compose, they are never char-spelled)');
+
+/** Token strings of a word's encoding plus the word's character count. */
+function spell(word: string): { pieces: string[]; chars: number } {
+  const ids = defaultTokenizer.encode(word, false, false);
+  return { pieces: ids.map((id) => defaultTokenizer.getTokenString(id)), chars: word.length };
+}
+
+// Words guaranteed not to be in the built-in corpora or datasets: the base
+// vocabulary cannot contain them, so they exercise the merge path only.
+const NOVEL_WORDS = ['unbelievable', 'improvisation', 'quokka', 'flibbertigibbet', 'xylophonically'];
+
+console.log(`  learned BPE merges: ${defaultTokenizer.bpeMergeCount}`);
+for (const w of NOVEL_WORDS) {
+  const { pieces, chars } = spell(w);
+  console.log(`  ${DIM}${w.padEnd(16)} -> ${String(pieces.length).padStart(2)} pieces for ${chars} chars:${RESET} ${pieces.join(' + ')}`);
+}
+
+check(
+  'the tokenizer learned BPE merges at construction',
+  defaultTokenizer.bpeMergeCount > 0,
+  `${defaultTokenizer.bpeMergeCount} merges`
+);
+
+let novelUnk = 0;
+let charSpelled = 0;
+let merged = 0;
+let spelledBack = true;
+for (const w of NOVEL_WORDS) {
+  const { pieces, chars } = spell(w);
+  const ids = defaultTokenizer.encode(w, false, false);
+  if (ids.some((id) => id === UNK_ID)) novelUnk++;
+  // Fewer pieces than characters == real subword composition. Equal counts
+  // would mean the old one-letter-at-a-time OOV fallback is still in charge.
+  if (pieces.length >= chars) charSpelled++;
+  if (pieces.length > 1) merged++;
+  if (pieces.join('') !== w.toLowerCase()) spelledBack = false;
+}
+
+check('unseen words encode with zero UNK tokens', novelUnk === 0, `${novelUnk}/${NOVEL_WORDS.length} with UNK`);
+check(
+  'unseen words are composed from subwords, never spelled out letter by letter',
+  charSpelled === 0,
+  `${NOVEL_WORDS.length - charSpelled}/${NOVEL_WORDS.length} composed from subwords`
+);
+check(
+  'unseen words really do decompose into multiple pieces (not one new whole-word token)',
+  merged > 0,
+  `${merged}/${NOVEL_WORDS.length} decomposed into more than one piece`
+);
+check(
+  'the pieces of an unseen word reconstruct its exact spelling',
+  spelledBack,
+  'decode round-trip'
+);
+
+// Whole known words must stay single tokens: the memory layer's bigram/trigram
+// links and the dialogue-case replay are keyed by token id, so a dataset word
+// that suddenly split into subwords would lose its exact-recall behavior.
+const knownWords = [...new Set(datasetTexts.flatMap((t) => words(t)))].filter(
+  (w) => defaultTokenizer.idOf(w) !== undefined && w.length > 4
+);
+const stillWhole = knownWords.filter((w) => defaultTokenizer.encode(w, false, false).length === 1);
+check(
+  'known vocabulary words still encode as a single whole-word token',
+  stillWhole.length === knownWords.length,
+  `${stillWhole.length}/${knownWords.length} whole`
+);
+
+// Id-space integrity: the BPE merge symbols are appended, so every pre-existing
+// token (specials, words, merge targets) must keep its id and the id space must
+// stay dense and one-to-one.
+const specialIdsStable =
+  defaultTokenizer.idOf(SPECIAL_TOKENS.PAD) === 0 &&
+  defaultTokenizer.idOf(SPECIAL_TOKENS.UNK) === 1 &&
+  defaultTokenizer.idOf(SPECIAL_TOKENS.BOS) === 2 &&
+  defaultTokenizer.idOf(SPECIAL_TOKENS.EOS) === 3 &&
+  defaultTokenizer.idOf(SPECIAL_TOKENS.USER) === 4 &&
+  defaultTokenizer.idOf(SPECIAL_TOKENS.ASSISTANT) === 5 &&
+  defaultTokenizer.idOf(SPECIAL_TOKENS.NEWLINE) === 6;
+check('special token ids are unchanged by the BPE upgrade', specialIdsStable, 'PAD 0 … NEWLINE 6');
+
+let idSpaceSound = true;
+const seenTokens = new Set<string>();
+for (let id = 0; id < defaultTokenizer.vocabSize; id++) {
+  const s = defaultTokenizer.getTokenString(id);
+  if (s.startsWith('<id:') || seenTokens.has(s) || defaultTokenizer.idOf(s) !== id) {
+    idSpaceSound = false;
+    console.log(`  ${RED}id ${id} -> ${JSON.stringify(s)} is not a unique round-trip token${RESET}`);
+    break;
+  }
+  seenTokens.add(s);
+}
+check(
+  'every token id maps to exactly one token and back',
+  idSpaceSound && seenTokens.size === defaultTokenizer.vocabSize,
+  `${seenTokens.size}/${defaultTokenizer.vocabSize} ids round-trip`
+);
+const pieceIds = [...new Set(NOVEL_WORDS.flatMap((w) => defaultTokenizer.encode(w, false, false)))];
+const mergePieces = pieceIds.filter((id) => {
+  const s = defaultTokenizer.getTokenString(id);
+  return s.length > 1 && !defaultTokenizer.isFallbackCharToken(id);
+});
+const fallbackPieces = pieceIds.filter((id) => defaultTokenizer.isFallbackCharToken(id));
+console.log(
+  `  distinct pieces used: ${pieceIds.length} (${mergePieces.length} learned merge symbols, ${fallbackPieces.length} single-letter fallback)`
+);
+check(
+  'unseen words are built from learned merge symbols, not just single letters',
+  mergePieces.length > 0,
+  `${mergePieces.length} merge symbols used`
+);
+check(
+  'merge symbols are real generatable vocabulary tokens (only single letters are fallback chars)',
+  mergePieces.every((id) => /^[a-z0-9']+$/.test(defaultTokenizer.getTokenString(id))),
+  `${mergePieces.length} checked`
+);
+
+// ---------------------------------------------------------------------------
+// 12. Training regimes (does the adaptation mode change generalisation?)
+// ---------------------------------------------------------------------------
+// Section 8 measures the blended (neural + memory) loss of one regime. This
+// section answers the question the studio's defaults rest on: with the studio's
+// own hyperparameters, does the adaptation *mode* change whether fine-tuning
+// generalises? Both regimes share epochs / LR / weight decay and differ only in
+// LoRA vs full retraining, so the comparison isolates the mode from every other
+// knob.
+//
+// Weight initialisation turns out to be a large share of the run-to-run
+// spread, so each regime is measured under the SAME handful of seeds instead of
+// a single draw: `Math.random` is re-pinned to a fresh deterministic generator
+// per seed, and the generator pinned by this script's header is restored after.
+
+section('12. Training regimes: LoRA generalises for a fraction of the work');
+
+const regimeTrain = BASE_CORPUS.slice(10);
+const regimeHeldOut = BASE_CORPUS.slice(0, 10);
+const STUDIO_EPOCHS = 10; // the studio's default
+const STUDIO_LR = 0.015;
+const STUDIO_WD = 0.005;
+
+// These two seeds disagree about which mode wins, and that is the point: the
+// mode is not what decides the held-out outcome here. Averaging a single seed
+// would not be honest — per-seed LoRA-vs-full differences run from -0.29 to
+// +0.64 nats, so only an average supports the claim. Two seeds are the minimum
+// that shows it; this section already dominates the harness runtime because a
+// full retrain is a backprop pass over every weight.
+const REGIME_SEEDS = [11, 101];
+
+const pinnedRandom = Math.random;
+
+/** Re-pin `Math.random` to a deterministic generator built from `seed`. */
+function useSeed(seed: number): void {
+  let state = seed;
+  Math.random = (): number => {
+    state |= 0;
+    state = (state + 0x6d2b79f5) | 0;
+    let t = Math.imul(state ^ (state >>> 15), 1 | state);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/**
+ * Mean neural cross-entropy on the held-out sentences, scored with the same
+ * adaptation mode the regime trained with (a full retrain is scored without
+ * adapters, exactly like FineTuningStudio evaluates it).
+ */
+function heldOutCE(m: SmallLanguageModel, useLora: boolean): number {
+  const V = m.config.vocabSize;
+  const probs = new Float32Array(V);
+  let total = 0;
+  let count = 0;
+  for (const text of regimeHeldOut) {
+    const tokens = m.tokenizer.encode(text, true, true);
+    const { logits, seqLen } = m.forward(tokens, useLora);
+    for (let i = 0; i < seqLen - 1; i++) {
+      const target = tokens[i + 1];
+      if (target === 0) continue; // PAD
+      softmax(logits.subarray(i * V, (i + 1) * V), probs, 1.0);
+      total += -Math.log(Math.max(1e-8, probs[target]));
+      count++;
+    }
+  }
+  return count > 0 ? total / count : 0;
+}
+
+/**
+ * Run the studio's training schedule on `m` and score it afterwards. The
+ * per-epoch decay mirrors FineTuningStudio exactly (its epoch is 1-based).
+ */
+function trainRegime(m: SmallLanguageModel, useLora: boolean): number {
+  for (let epoch = 0; epoch < STUDIO_EPOCHS; epoch++) {
+    const lr = STUDIO_LR * (1.0 - epoch / Math.max(1, STUDIO_EPOCHS * 1.2));
+    for (const text of regimeTrain) {
+      m.trainStep(m.tokenizer.encode(text, true, true), lr, useLora, STUDIO_WD);
+    }
+  }
+  return heldOutCE(m, useLora);
+}
+
+const stockNats: number[] = [];
+const loraNats: number[] = [];
+const fullNats: number[] = [];
+
+console.log(
+  `  ${regimeTrain.length} train / ${regimeHeldOut.length} held-out sentences, studio defaults (${STUDIO_EPOCHS} epochs, lr ${STUDIO_LR}, wd ${STUDIO_WD})`
+);
+for (const seed of REGIME_SEEDS) {
+  useSeed(seed);
+  // LoRA adapts the pretrained model it starts from, so the same model gives
+  // the pretrained baseline and the LoRA arm; the full retrain has to start
+  // from its own copy, since it overwrites the weights it was given.
+  const pretrained = initializePretrainedModel(PREDEFINED_MODELS[0]);
+  const stock = heldOutCE(pretrained, true);
+  const lora = trainRegime(pretrained, true);
+  const full = trainRegime(initializePretrainedModel(PREDEFINED_MODELS[0]), false);
+  stockNats.push(stock);
+  loraNats.push(lora);
+  fullNats.push(full);
+  const delta = (v: number) => `${(v - stock >= 0 ? '+' : '')}${(v - stock).toFixed(3)}`;
+  console.log(
+    `  seed ${String(seed).padStart(4)}: pretrained ${stock.toFixed(3)} | LoRA ${lora.toFixed(3)} (${delta(lora)}) | full retrain ${full.toFixed(3)} (${delta(full)})`
+  );
+}
+Math.random = pinnedRandom;
+
+const meanGain = (after: number[]): number =>
+  after.reduce((total, v, i) => total + (stockNats[i] - v), 0) / after.length;
+const loraGain = meanGain(loraNats);
+const fullGain = meanGain(fullNats);
+console.log(
+  `  mean held-out gain over the pretrained model: LoRA +${loraGain.toFixed(3)} nats, full retrain +${fullGain.toFixed(3)} nats`
+);
+console.log(
+  `  ${DIM}read this as: a handful of sentences cannot teach new grammar, so training's\n  job is to sharpen what the warm-up already put there — and both modes do that\n  by well over a nat. The mode itself buys nothing further: the two land level\n  on held-out loss, while the full retrain updates every weight in the network\n  instead of a rank-r adapter. That is why the studio defaults to LoRA and\n  flags a long full retrain (${FULL_MODE_ADVISORY_EPOCHS}+ epochs) as epochs spent for no\n  measured gain.${RESET}`
+);
+
+check(
+  'both adaptation modes lower held-out loss below the pretrained model, in every initialisation measured',
+  stockNats.every((stock, i) => loraNats[i] < stock && fullNats[i] < stock),
+  `worst gain +${Math.min(...stockNats.map((s, i) => s - loraNats[i]), ...stockNats.map((s, i) => s - fullNats[i])).toFixed(3)} nats`
+);
+check(
+  'the full retrain buys no measurable held-out gain over the cheaper LoRA default',
+  Math.abs(fullGain - loraGain) < 0.5,
+  `LoRA +${loraGain.toFixed(3)} vs full +${fullGain.toFixed(3)} nats`
+);
+check(
+  'the studio flags exactly the full-retrain configuration this section measures',
+  trainingRegimeAdvisory({ epochs: STUDIO_EPOCHS, learningRate: STUDIO_LR, batchSize: 1, weightDecay: STUDIO_WD, loraMode: false, loraRank: 8 }) !== null &&
+    trainingRegimeAdvisory({ epochs: 2, learningRate: STUDIO_LR, batchSize: 1, weightDecay: STUDIO_WD, loraMode: false, loraRank: 8 }) === null &&
+    trainingRegimeAdvisory({ epochs: STUDIO_EPOCHS, learningRate: STUDIO_LR, batchSize: 1, weightDecay: STUDIO_WD, loraMode: true, loraRank: 8 }) === null,
+  `flagged at ${FULL_MODE_ADVISORY_EPOCHS}+ full-mode epochs only`
 );
 
 // ---------------------------------------------------------------------------

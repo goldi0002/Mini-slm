@@ -25,7 +25,8 @@ A toy transformer (~50k–120k parameters) running in a browser tab cannot learn
 ├── src/
 │   ├── slm/
 │   │   ├── matrix.ts                         # Vector/matrix ops, GELU, LayerNorm, Softmax, Box-Muller
-│   │   ├── tokenizer.ts                      # Conversational tokenizer, special tokens, dynamic vocab expansion
+│   │   ├── corpus.ts                         # Dependency-free seed corpus + BPE seed words (breaks the tokenizer ↔ transformer import cycle)
+│   │   ├── tokenizer.ts                      # Hybrid word-level + BPE subword tokenizer, special tokens, dynamic vocab expansion
 │   │   ├── ngram.ts                          # Trigram model with backoff, dialogue pairing, boundary rules
 │   │   ├── transformer.ts                    # SmallLanguageModel: attention, LoRA, forward, backward, generation
 │   │   ├── predefinedModels.ts               # Model configurations (Assistant-48, NanoLM-Light) and warm-up
@@ -56,6 +57,21 @@ A toy transformer (~50k–120k parameters) running in a browser tab cannot learn
 - **LoRA (Low-Rank Adaptation)**: Injected on query (`lora_q_A`, `lora_q_B`) and value (`lora_v_A`, `lora_v_B`) projections with scaling factor `loraAlpha / loraRank`. Full-model fine-tuning is also supported.
 - **Zero-Heap Thrashing**: Reusable flat scratch buffers (`q_buf`, `k_buf`, `v_buf`, `attn_scores`, etc.) are allocated up-front. Resets use a flat snapshot buffer (`baseWeightsSnapshot`) without GC stalls.
 
+### Hybrid Word-Level + BPE Subword Tokenizer (`src/slm/tokenizer.ts`)
+The vocabulary is built in four deterministic stages, and only stages 3–4 ever append ids:
+1. `CONVERSATIONAL_VOCAB` (~268 everyday words, punctuation, digits).
+2. The single-character OOV fallback alphabet (lowercase, then uppercase letters that do not shadow a real word).
+3. Every word of `BASE_CORPUS` as a whole-word token, so the fluent baseline never depends on subword composition.
+4. BPE merge symbols learned from `BASE_CORPUS` + `BPE_SEED_WORDS` (≤ `MAX_BPE_MERGES = 256`).
+
+Encoding rule: a word already in the vocabulary is **one token** (exactly as before, so dataset exact-recall, n-gram links and dialogue-case keys keep working); a word that is *not* in the vocabulary decomposes into learned subword pieces ("unbelievable" → `un` + `believable`, "improvisation" → `im` + `p` + `ro` + `v` + `is` + `ation`) instead of being spelled out one character at a time. Merge symbols are ordinary generatable tokens, not fallback chars, so `isFallbackCharToken()` still suppresses only genuine single-letter OOV fallbacks.
+
+BPE details:
+- `learnBpeMerges()` runs at construction, weights adjacent symbol pairs by word frequency, requires frequency ≥ 2, and breaks ties on the lexicographically smallest pair — the vocabulary is identical on every load.
+- `bpeSplit()` applies the lowest-ranked (earliest-learned) merge present until no known pair remains; `wordToIds()` memoizes the result in `wordCache` (cleared past 8192 entries and invalidated by `addWord`, because a newly learned whole word must supersede a cached split).
+- Id bookkeeping goes through the single private `addToken()` helper so `nextId`, `tokenToId`, `idToToken` and `vocabSize` can never drift apart.
+- `corpus.ts` holds `BASE_CORPUS`/`BPE_SEED_WORDS` and imports nothing: the tokenizer learns merges from it, and importing the transformer there would create a tokenizer → transformer → tokenizer cycle.
+
 ### Dynamic Vocabulary Expansion
 - Special tokens: `<pad>` (0), `<unk>` (1), `<bos>` (2), `<eos>` (3), `<user>` (4), `<assistant>` (5), `\n` (6).
 - `defaultTokenizer.learnWords(words)`: When user edits or imports datasets in the Dataset Manager, new words are ingested into the vocabulary table. Because weight matrices and embedding tables depend on vocabulary size, adding new words rebuilds the model with the updated dimension.
@@ -79,9 +95,12 @@ A toy transformer (~50k–120k parameters) running in a browser tab cannot learn
    - `datasets` state is owned in `src/App.tsx`.
    - Modifying or importing turns triggers `defaultTokenizer.learnWords(...)`. If new words are added, the model is re-initialized to match the expanded vocabulary table.
 2. **Fine-Tuning State**:
-   - Training can run on live datasets with LoRA or full weight fine-tuning.
+   - Training can run on live datasets with LoRA or full weight fine-tuning. The studio defaults to LoRA (`loraMode: true`, 10 epochs, lr 0.015, wd 0.005) for a measured reason: on held-out sentences both modes cut loss by well over a nat, but the full retrain buys no gain at all over the cheaper adapter (see diag section 12).
+   - `FULL_MODE_ADVISORY_EPOCHS` / `trainingRegimeAdvisory(hyperparams)` in `FineTuningStudio.tsx` drive the amber advisory shown under the adaptation-mode selector for a long full retrain (4+ epochs) — the threshold is a measurement, not taste, so re-measure before changing it.
    - `resetToBase()` resets both neural weights (restoring from typed array snapshot) and memory layer tables, cleanly clearing fine-tuned badges.
 3. **Verification**:
    - Always run `npm run lint` (`tsc --noEmit`) to verify strict type correctness.
    - Verify builds via `compile_applet` before finishing tasks.
    - Diagnostic scripts like `scripts/diagnose-slm.ts` can verify generation and loss behavior.
+   - `scripts/diag_script.ts` section 11 covers the BPE tokenizer (unseen words compose, known words stay whole tokens, special ids unchanged, id space round-trips).
+   - `scripts/diag_script.ts` section 12 covers the training regimes: it re-pins `Math.random` per seed and trains both adaptation modes on sentences held out of training, because the per-seed winner flips and only an average supports the "LoRA is enough" claim behind the studio default. It is the slowest section (full backprop passes over every weight), so the whole harness takes roughly two minutes.
