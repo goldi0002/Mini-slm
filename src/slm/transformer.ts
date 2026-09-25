@@ -6,6 +6,7 @@
 import { ModelConfig, GenerationOptions, GeneratedTokenInfo } from '../types';
 import { Tokenizer, defaultTokenizer, BOS_ID, EOS_ID, PAD_ID, UNK_ID, USER_ID, ASSISTANT_ID, NEWLINE_ID } from './tokenizer';
 import { NgramLanguageModel } from './ngram';
+import { BASE_CORPUS } from './corpus';
 import {
   createFloat32Matrix,
   createRandomNormalMatrix,
@@ -110,6 +111,12 @@ export class SmallLanguageModel {
   private scratchFinalNorm: Float32Array;
   private scratchLogits: Float32Array;
 
+  // Rank-sized scratch for the LoRA low-rank projections. u = A·x depends only
+  // on the token position and the input, never on the output row, so it is
+  // computed once per position instead of once per row (see forward()).
+  private scratchLoraQ: Float32Array;
+  private scratchLoraV: Float32Array;
+
   // Last computed attention maps for architecture inspector: [layer][head][seq_len, seq_len]
   public lastAttentionMaps: number[][][][] = [];
 
@@ -138,6 +145,12 @@ export class SmallLanguageModel {
 
   // Tokens produced for the current reply, used to hold back a premature EOS.
   private generatedCount = 0;
+
+  // Set once a full retrain (loraMode: false) has run on this model. A full
+  // retrain updates lm_head and leaves the LoRA adapters at their zero
+  // initialization, so the adapters alone cannot tell whether the model was
+  // fine-tuned. Cleared by resetToBase().
+  private fullFineTuneApplied = false;
 
   // Activation cache and gradient scratch for LoRA training, both allocated on
   // first use so inference-only paths never pay for them.
@@ -196,6 +209,9 @@ export class SmallLanguageModel {
     this.scratchMid = new Float32Array(ffn);
     this.scratchFinalNorm = new Float32Array(maxT * d);
     this.scratchLogits = new Float32Array(maxT * v);
+    const rank = Math.max(1, this.config.loraRank);
+    this.scratchLoraQ = new Float32Array(rank);
+    this.scratchLoraV = new Float32Array(rank);
 
     // Initialize the statistical memory layer with baseline conversational English.
     // The EOS id lets it learn how utterances end, so a reply can stop at a
@@ -286,50 +302,12 @@ export class SmallLanguageModel {
   /**
    * Baseline conversational corpus for the statistical memory layer, written
    * against the tokenizer vocabulary so the base model is already fluent.
+   *
+   * The text itself lives in `./corpus` because the tokenizer learns its BPE
+   * merges from it at construction time, and the tokenizer must not import the
+   * transformer (that would be a circular module dependency).
    */
-  public static readonly BASE_CORPUS: string[] = [
-    'hello ! I am your conversational AI assistant . how can I help you today ?',
-    'hello how are you doing today ? I am here to assist and chat with you .',
-    'I am doing wonderful , thank you for asking ! how is your day going ?',
-    'hi there ! it is great to hear from you . what is on your mind ?',
-    'you are very welcome ! I am always glad to chat and assist you .',
-    'that is a thoughtful question . let us explore the answer together .',
-    'I am here for you . remember to take a short break and rest your mind .',
-    'every small positive habit creates meaningful progress over time .',
-    'certainly ! I would be delighted to share some ideas with you .',
-    'I am your friendly AI assistant , and I love a good conversation .',
-    'what a great question ! here is what I think about it .',
-    'of course ! tell me more about what you need and I will help you .',
-    'I am listening . share your thoughts and we can think it through together .',
-    'take a slow deep breath . let us look at your ideas one step at a time .',
-    'you are doing great . keep going and stay curious .',
-    'that is wonderful to hear ! tell me more about your day .',
-    'sometimes the best answer is to rest for a moment and then try again .',
-    'learning something new every day keeps the mind fresh and happy .',
-    'what would you like to talk about today ?',
-    'I can help you plan your day , share ideas , or simply chat with you .',
-    'staying calm and focused one moment at a time is a wonderful habit .',
-    'water , sunlight , a short walk , and a good book make a peaceful day .',
-    'music can lift your mood and give you fresh energy for the day .',
-    'the sky is beautiful today . enjoy the light while it lasts .',
-    'every conversation is a chance to learn something new .',
-    'your ideas matter , and I enjoy hearing every one of them .',
-    'if you feel stressed , pause , breathe slowly , and count to four .',
-    'a grateful mind is a peaceful mind . what are you thankful for today ?',
-    'small steps taken every day create big change over time .',
-    'I am always here whenever you want to talk or share an idea .',
-    'that sounds like a lovely plan ! how can I help you make it happen ?',
-    'asking questions is how we grow . never stop being curious .',
-    'kindness costs nothing and makes the world a warmer place .',
-    'rest is not a reward for work , it is part of a good life .',
-    'the best time to start is right now , one small step at a time .',
-    'listening is a gift you can give to another person today .',
-    'I hope your day is full of good thoughts and gentle moments .',
-    'remember to drink water and take a short walk between tasks .',
-    'it is okay to feel uncertain . clarity comes one thought at a time .',
-    'thank you for this lovely conversation . come back and chat anytime !',
-    'goodbye for now ! I am here whenever you need a friend to talk to .'
-  ];
+  public static readonly BASE_CORPUS: string[] = BASE_CORPUS;
 
   private seedMemoryCorpus(): void {
     for (const seq of SmallLanguageModel.BASE_CORPUS) {
@@ -467,6 +445,11 @@ export class SmallLanguageModel {
     // Snapshot the statistical memory layer together with the weights so
     // reset-to-base restores the exact pre-fine-tuning language behavior.
     this.baseMemorySnapshot = this.memory.snapshot();
+
+    // The snapshot *is* the base model: any training that happened before it
+    // (e.g. the pre-training warm-up) counts as base, and resetToBase() returns
+    // the weights to exactly this state — so no adaptation is outstanding.
+    this.fullFineTuneApplied = false;
   }
 
   /**
@@ -509,12 +492,20 @@ export class SmallLanguageModel {
     if (this.baseMemorySnapshot) {
       this.memory.restore(this.baseMemorySnapshot);
     }
+
+    // The weights are back at the base checkpoint, so no adaptation is left.
+    this.fullFineTuneApplied = false;
   }
 
   /**
-   * Returns true if any LoRA adapter weights have been updated from their zero-initialization.
+   * Returns true if the model's weights have been adapted at all.
+   *
+   * LoRA fine-tuning is visible in the adapter matrices, while a full retrain
+   * updates `lm_head` and leaves the adapters at zero — checking the adapters
+   * alone made a fully retrained model report itself as base pretrained.
    */
   public isFineTuned(): boolean {
+    if (this.fullFineTuneApplied) return true;
     return this.weights.layers.some(
       (l) =>
         l.lora_q_B.some((w) => Math.abs(w) > 1e-6) ||
@@ -548,7 +539,9 @@ export class SmallLanguageModel {
       this.scratchXNorm2.length +
       this.scratchMid.length +
       this.scratchFinalNorm.length +
-      this.scratchLogits.length
+      this.scratchLogits.length +
+      this.scratchLoraQ.length +
+      this.scratchLoraV.length
     ) * 4 + this.trainingScratchFloats() * 4;
     const snapshotMemoryBytes = (this.baseWeightsSnapshot?.length ?? 0) * 4;
     const totalBytes = weightsMemoryBytes + scratchMemoryBytes + snapshotMemoryBytes;
@@ -1056,11 +1049,30 @@ export class SmallLanguageModel {
       if (cache) copyInto(cache.norm1[l], this.scratchXNorm1, tokenArea);
 
       // Linear projections: Q, K, V
+      const useAdapters = useLora && loraRank > 0;
       for (let i = 0; i < seqLen; i++) {
         const xi = this.scratchXNorm1.subarray(i * dModel, (i + 1) * dModel);
         const qi = this.scratchQ.subarray(i * dModel, (i + 1) * dModel);
         const ki = this.scratchK.subarray(i * dModel, (i + 1) * dModel);
         const vi = this.scratchV.subarray(i * dModel, (i + 1) * dModel);
+
+        // LoRA down-projection: u = A x is rank-sized and independent of the
+        // output row, so it is computed once per token position here. Deriving
+        // it inside the row loop re-ran the full dModel-wide dot product dModel
+        // times per token — the quadratic overhead this avoids.
+        if (useAdapters) {
+          for (let r = 0; r < loraRank; r++) {
+            let aQ = 0, aV = 0;
+            const aOffset = r * dModel;
+            for (let c = 0; c < dModel; c++) {
+              const val = xi[c];
+              aQ += layer.lora_q_A[aOffset + c] * val;
+              aV += layer.lora_v_A[aOffset + c] * val;
+            }
+            this.scratchLoraQ[r] = aQ;
+            this.scratchLoraV[r] = aV;
+          }
+        }
 
         for (let row = 0; row < dModel; row++) {
           let sumQ = 0, sumK = 0, sumV = 0;
@@ -1072,18 +1084,14 @@ export class SmallLanguageModel {
             sumV += layer.v_proj[rOffset + col] * val;
           }
 
-          // LoRA modification: W + (B @ A) * alpha / rank
-          if (useLora && loraRank > 0) {
+          // LoRA modification: W + (B @ A) * alpha / rank, with the cached
+          // down-projection u = A x feeding the rank-sized up-projection.
+          if (useAdapters) {
             let loraQ = 0, loraV = 0;
+            const bOffset = row * loraRank;
             for (let r = 0; r < loraRank; r++) {
-              let aQ = 0, aV = 0;
-              const aOffset = r * dModel;
-              for (let c = 0; c < dModel; c++) {
-                aQ += layer.lora_q_A[aOffset + c] * xi[c];
-                aV += layer.lora_v_A[aOffset + c] * xi[c];
-              }
-              loraQ += layer.lora_q_B[row * loraRank + r] * aQ;
-              loraV += layer.lora_v_B[row * loraRank + r] * aV;
+              loraQ += layer.lora_q_B[bOffset + r] * this.scratchLoraQ[r];
+              loraV += layer.lora_v_B[bOffset + r] * this.scratchLoraV[r];
             }
             sumQ += loraQ * loraScale;
             sumV += loraV * loraScale;
@@ -1245,6 +1253,12 @@ export class SmallLanguageModel {
     // Forward pass
     const { logits } = this.forward(tokens, loraMode, loraTraining);
 
+    // A full retrain adapts lm_head while the LoRA adapters stay at zero, so
+    // record the adaptation for isFineTuned() (resetToBase() clears it).
+    if (!loraMode) {
+      this.fullFineTuneApplied = true;
+    }
+
     let totalLoss = 0;
     let targetCount = 0;
 
@@ -1274,7 +1288,6 @@ export class SmallLanguageModel {
 
     const neuralProbs = new Float32Array(vocabSize);
     const mixed = new Float32Array(vocabSize);
-
     for (let i = 0; i < seqLen - 1; i++) {
       let targetToken = tokens[i + 1];
       if (targetToken < 0 || targetToken >= vocabSize || !Number.isFinite(targetToken)) {

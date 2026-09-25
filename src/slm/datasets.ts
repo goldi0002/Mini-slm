@@ -20,6 +20,12 @@ export const PREDEFINED_DATASETS: DatasetPreset[] = [
         category: 'Greeting'
       },
       {
+        id: 'ha-9',
+        user: 'what can you do',
+        assistant: 'I can converse with you , share ideas , and be fine tuned on custom chat datasets .',
+        category: 'Capabilities'
+      },
+      {
         id: 'ha-2',
         user: 'how are you doing today',
         assistant: 'I am doing wonderful , thank you for asking ! how has your day been treating you so far ?',
