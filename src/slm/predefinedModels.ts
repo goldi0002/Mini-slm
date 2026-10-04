@@ -60,9 +60,9 @@ ensureVocabulary();
 
 export const PREDEFINED_MODELS: ModelConfig[] = [
   {
-    id: 'smollm2-360m-instruct',
-    name: 'SmolLM2 360M Instruct (Local)',
-    tagline: '360M pretrained parameters • Apache-2.0 • WebGPU/WASM • Runs locally in your browser',
+    id: 'smollm2-135m-instruct',
+    name: 'SmolLM2 135M Instruct (Local)',
+    tagline: '135M pretrained parameters • Apache-2.0 • WebGPU/WASM • Fast local browser inference',
     vocabSize: defaultTokenizer.vocabSize,
     dModel: 192,
     nHeads: 6,

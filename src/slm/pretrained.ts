@@ -5,13 +5,12 @@
  * Transformers.js in the browser. WebGPU is preferred when available; the
  * runtime falls back to WASM/CPU automatically.
  */
-import { pipeline } from '@huggingface/transformers';
+import { pipeline, TextStreamer } from '@huggingface/transformers';
 import type { GenerationOptions, GeneratedTokenInfo } from '../types';
-import { defaultTokenizer } from './tokenizer';
 
-export const PRETRAINED_MODEL_ID = 'onnx-community/SmolLM2-360M-Instruct-ONNX';
+export const PRETRAINED_MODEL_ID = 'onnx-community/SmolLM2-135M-Instruct-ONNX';
 
-type Generator = (messages: Array<{ role: string; content: string }>, options?: Record<string, unknown>) => Promise<unknown>;
+type Generator = ((messages: Array<{ role: string; content: string }>, options?: Record<string, unknown>) => Promise<unknown>) & {\n  tokenizer: { decode: (ids: bigint[] | number[], options?: Record<string, unknown>) => string };\n};
 
 let generatorPromise: Promise<Generator> | null = null;
 
@@ -24,7 +23,7 @@ async function getGenerator(): Promise<Generator> {
     const device = getDevice();
     generatorPromise = pipeline('text-generation', PRETRAINED_MODEL_ID, {
       device,
-      dtype: 'q4',
+      dtype: device === 'webgpu' ? 'q4f16' : 'q4',
     }) as unknown as Promise<Generator>;
   }
   return generatorPromise;
