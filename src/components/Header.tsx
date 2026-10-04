@@ -130,7 +130,7 @@ export const Header: React.FC<HeaderProps> = ({
           ))}
         </select>
         <span className="app-model-row__meta">
-          {paramStats.total.toLocaleString()} params · {memoryFormatted}
+          {(currentModel.displayParameterCount ?? paramStats.total).toLocaleString()} params · {currentModel.displayMemory ?? memoryFormatted}
         </span>
       </div>
 
@@ -154,7 +154,7 @@ export const Header: React.FC<HeaderProps> = ({
         </div>
 
         <div className="app-nav__metrics" aria-label="Model metrics">
-          <span><strong>{paramStats.total.toLocaleString()}</strong> params</span>
+          <span><strong>{(currentModel.displayParameterCount ?? paramStats.total).toLocaleString()}</strong> params</span>
           <i />
           <span><strong>{defaultTokenizer.vocabSize.toLocaleString()}</strong> vocab</span>
           <i />
