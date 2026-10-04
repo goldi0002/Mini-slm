@@ -2,8 +2,9 @@
  * Browser-local pretrained language model runtime.
  *
  * The weights are downloaded from Hugging Face on first use and then cached by
- * Transformers.js in the browser. WebGPU is preferred when available; the
- * runtime falls back to WASM/CPU automatically.
+ * Transformers.js in the browser. WebGPU is preferred when available, with a
+ * real WASM/CPU fallback for browsers where WebGPU initialization or execution
+ * is unavailable.
  */
 import { pipeline, TextStreamer } from '@huggingface/transformers';
 import type { GenerationOptions, GeneratedTokenInfo } from '../types';
@@ -16,18 +17,51 @@ type Generator = ((messages: Array<{ role: string; content: string }>, options?:
 
 let generatorPromise: Promise<Generator> | null = null;
 
-function getDevice(): 'webgpu' | 'wasm' {
-  return typeof navigator !== 'undefined' && 'gpu' in navigator ? 'webgpu' : 'wasm';
+async function hasUsableWebGPU(): Promise<boolean> {
+  if (typeof navigator === 'undefined' || !('gpu' in navigator)) return false;
+
+  try {
+    const gpu = (navigator as Navigator & {
+      gpu?: { requestAdapter: () => Promise<unknown | null> };
+    }).gpu;
+    return Boolean(gpu && await gpu.requestAdapter());
+  } catch {
+    return false;
+  }
+}
+
+async function createGenerator(device: 'webgpu' | 'wasm'): Promise<Generator> {
+  return pipeline('text-generation', PRETRAINED_MODEL_ID, {
+    device,
+    dtype: device === 'webgpu' ? 'q4f16' : 'q4',
+  }) as unknown as Promise<Generator>;
 }
 
 async function getGenerator(): Promise<Generator> {
   if (!generatorPromise) {
-    const device = getDevice();
-    generatorPromise = pipeline('text-generation', PRETRAINED_MODEL_ID, {
-      device,
-      dtype: device === 'webgpu' ? 'q4f16' : 'q4',
-    }) as unknown as Promise<Generator>;
+    generatorPromise = (async () => {
+      const webgpuAvailable = await hasUsableWebGPU();
+
+      if (webgpuAvailable) {
+        try {
+          return await createGenerator('webgpu');
+        } catch (error) {
+          // WebGPU can exist but still fail during ONNX model/kernel setup on
+          // a particular mobile GPU. Fall through to the compatible WASM path.
+          console.warn('WebGPU pretrained model initialization failed; falling back to WASM.', error);
+        }
+      }
+
+      return createGenerator('wasm');
+    })().catch((error) => {
+      // Do not permanently cache a rejected initialization promise. A later
+      // attempt should be able to retry after a transient download/runtime
+      // failure.
+      generatorPromise = null;
+      throw error;
+    });
   }
+
   return generatorPromise;
 }
 
@@ -84,7 +118,10 @@ export async function* generatePretrainedStream(prompt: string, options: Generat
   const pushToken = (ids: bigint[]) => {
     for (const rawId of ids) {
       const id = Number(rawId);
-      const token = generator.tokenizer.decode([rawId], { skip_special_tokens: true, clean_up_tokenization_spaces: false });
+      const token = generator.tokenizer.decode([rawId], {
+        skip_special_tokens: true,
+        clean_up_tokenization_spaces: false,
+      });
       if (!token) continue;
       queue.push({ token, id, prob: 1, topCandidates: [{ token, id, prob: 1 }] });
       waiters.shift()?.();
