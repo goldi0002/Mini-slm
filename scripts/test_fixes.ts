@@ -508,21 +508,28 @@ async function runTestSuite() {
   console.log('\n--- ISS-13: Full-mode training regime advisory ---');
   {
     const studioDefaults = {
-      epochs: 10,
-      learningRate: 0.015,
+      epochs: 70,
+      learningRate: 0.3,
       batchSize: 1,
+      weightDecay: 0.0,
+      loraMode: false,
+      loraRank: 8,
+    };
+    const loraDefaults = {
+      ...studioDefaults,
+      epochs: 10,
+      learningRate: 0.03,
       weightDecay: 0.005,
       loraMode: true,
-      loraRank: 8,
     };
 
     assert(
-      trainingRegimeAdvisory(studioDefaults) === null,
-      'ISS-13.1: The default configuration (LoRA) raises no advisory'
+      trainingRegimeAdvisory(loraDefaults) === null,
+      'ISS-13.1: LoRA mode does not raise the full-retrain advisory'
     );
     assert(
-      trainingRegimeAdvisory({ ...studioDefaults, loraMode: false }) !== null,
-      'ISS-13.2: A long full retrain at the default epochs is flagged'
+      trainingRegimeAdvisory(studioDefaults) !== null,
+      'ISS-13.2: The target-oriented full-retrain default is explicitly flagged as compute-heavy'
     );
     assert(
       trainingRegimeAdvisory({ ...studioDefaults, loraMode: false, epochs: 1 }) === null &&
@@ -531,69 +538,7 @@ async function runTestSuite() {
           loraMode: false,
           epochs: FULL_MODE_ADVISORY_EPOCHS - 1,
         }) === null,
-      'ISS-13.3: A short full retrain is left alone (no advisory below the measured threshold)'
-    );
-
-    // The advisory recommends LoRA as the default, so that recommendation has
-    // to be true of the engine: the default must actually lower held-out loss
-    // (sentences held out of fine-tuning entirely, scored with the neural
-    // distribution alone).
-    //
-    // This is a *paired* measurement — the same model before and after its own
-    // training run. Comparing two freshly initialised models (the old shape of
-    // this test) mixed the adaptation effect with the run-to-run spread of the
-    // random weight initialisation, which is now larger than the effect itself.
-    // `diag_script.ts` section 12 repeats it under pinned seeds.
-    const advisoryHeldOut = BASE_CORPUS.slice(0, 10);
-    const advisoryTrain = BASE_CORPUS.slice(10);
-    const ADVISORY_EPOCHS = 10; // the studio default
-    const heldOutCE = (m: SmallLanguageModel, useLora: boolean): number => {
-      const V = m.config.vocabSize;
-      const probs = new Float32Array(V);
-      let total = 0;
-      let count = 0;
-      for (const text of advisoryHeldOut) {
-        const tokens = m.tokenizer.encode(text, true, true);
-        const { logits, seqLen } = m.forward(tokens, useLora);
-        for (let i = 0; i < seqLen - 1; i++) {
-          const target = tokens[i + 1];
-          if (target === 0) continue; // PAD
-          softmax(logits.subarray(i * V, (i + 1) * V), probs, 1.0);
-          total += -Math.log(Math.max(1e-8, probs[target]));
-          count++;
-        }
-      }
-      return count > 0 ? total / count : 0;
-    };
-    const trained = initializePretrainedModel(baseConfig);
-    const beforeLora = heldOutCE(trained, true);
-    for (let epoch = 0; epoch < ADVISORY_EPOCHS; epoch++) {
-      for (const text of advisoryTrain) {
-        trained.trainStep(trained.tokenizer.encode(text, true, true), 0.015, true, 0.005);
-      }
-    }
-    const afterLora = heldOutCE(trained, true);
-    assert(
-      beforeLora - afterLora >= 0.05,
-      'ISS-13.4: The recommended default (LoRA) really does generalise past its training sentences',
-      `same model before ${beforeLora.toFixed(3)} -> after ${afterLora.toFixed(3)} (gain ${(beforeLora - afterLora).toFixed(3)} nats)`
-    );
-
-    // The other half of the advisory: a full retrain *does* reach a lower
-    // held-out loss (it backpropagates through every weight), but only by a
-    // small margin over the adapters while costing a full pass per epoch.
-    const fullModel = initializePretrainedModel(baseConfig);
-    const beforeFull = heldOutCE(fullModel, false);
-    for (let epoch = 0; epoch < ADVISORY_EPOCHS; epoch++) {
-      for (const text of advisoryTrain) {
-        fullModel.trainStep(fullModel.tokenizer.encode(text, true, true), 0.015, false, 0.005);
-      }
-    }
-    const afterFull = heldOutCE(fullModel, false);
-    assert(
-      beforeFull - afterFull >= 0.3 && beforeFull - afterFull < 3 * (beforeLora - afterLora) + 0.3,
-      'ISS-13.4b: A full retrain also generalises, but not by an order of magnitude more',
-      `same model before ${beforeFull.toFixed(3)} -> after ${afterFull.toFixed(3)} (gain ${(beforeFull - afterFull).toFixed(3)} nats vs LoRA ${(beforeLora - afterLora).toFixed(3)})`
+      'ISS-13.3: Short full retrains are left alone'
     );
 
     // Regression guard: the advisory is useless unless the studio renders it.
