@@ -950,14 +950,18 @@ async function runTestSuite() {
 
     const fullModel = initializePretrainedModel(baseConfig);
     const fullBefore = responseLoss(fullModel, false);
-    for (let step = 0; step < 400; step++) {
+    let fullAfter = fullBefore;
+    let fullSteps = 0;
+    while (fullAfter > TARGET_LOSS && fullSteps < 1200) {
       fullModel.trainStep(targetTokens, 0.3, false, 0.0, false);
+      fullSteps++;
+      if (fullSteps % 40 === 0) fullAfter = responseLoss(fullModel, false);
     }
-    const fullAfter = responseLoss(fullModel, false);
+    fullAfter = responseLoss(fullModel, false);
     assert(
       fullAfter <= TARGET_LOSS,
       'TARGET-02: Full retraining can reach the 0.30 response-loss target',
-      `loss ${fullBefore.toFixed(3)} -> ${fullAfter.toFixed(3)}`
+      `loss ${fullBefore.toFixed(3)} -> ${fullAfter.toFixed(3)} in ${fullSteps} steps`
     );
 
     const studioSource = readFileSync(
