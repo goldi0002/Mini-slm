@@ -3,7 +3,8 @@ name: learning-pipeline-verification
 on:
   push:
     branches:
-      - fix/learning-pipeline-14-23
+      - main
+      - 'fix/**'
   workflow_dispatch:
 
 permissions:
