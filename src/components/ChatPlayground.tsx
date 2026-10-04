@@ -103,7 +103,7 @@ export const ChatPlayground: React.FC<ChatPlaygroundProps> = ({
     topK: 8,
     topP: 0.9,
     repetitionPenalty: 1.12,
-    maxNewTokens: 48,
+    maxNewTokens: 32,
   });
 
   const chatEndRef = useRef<HTMLDivElement>(null);
