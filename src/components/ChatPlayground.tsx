@@ -143,8 +143,27 @@ export const ChatPlayground: React.FC<ChatPlaygroundProps> = ({
 
     try {
       await runGeneration(text);
+    } catch (error) {
+      console.error('Local generation failed:', error);
+      // Never leave an empty assistant bubble behind when the runtime fails.
+      setMessages((prev) => prev.map((m) =>
+        m.role === 'assistant' && m.content.trim() === ''
+          ? { ...m, content: 'The local model could not generate a reply. Please try again.' }
+          : m
+      ));
+      setCompareMessages((prev) => ({
+        base: prev.base.map((m) =>
+          m.role === 'assistant' && m.content.trim() === ''
+            ? { ...m, content: 'The local model could not generate a reply. Please try again.' }
+            : m
+        ),
+        finetuned: prev.finetuned.map((m) =>
+          m.role === 'assistant' && m.content.trim() === ''
+            ? { ...m, content: 'The local model could not generate a reply. Please try again.' }
+            : m
+        ),
+      }));
     } finally {
-      // Always release the UI, even if a generation step throws.
       setIsGenerating(false);
     }
   };
