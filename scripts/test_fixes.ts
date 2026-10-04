@@ -948,6 +948,10 @@ async function runTestSuite() {
     for (let step = 0; step < 80; step++) fullFast.trainStep(diagnosticTokens, 0.2, false, 0.0, false);
     const fastAfter = responseLoss(fullFast);
     console.log('  📈 DIAG Full response loss @0.20: ' + fastBefore.toFixed(3) + ' -> ' + fastAfter.toFixed(3) + ' after 80 steps (target 0.30)');
+
+    for (let step = 80; step < 400; step++) fullFast.trainStep(diagnosticTokens, 0.2, false, 0.0, false);
+    const fastLongAfter = responseLoss(fullFast);
+    console.log('  📈 DIAG Full response loss @0.20 long: ' + fastAfter.toFixed(3) + ' -> ' + fastLongAfter.toFixed(3) + ' after 400 total steps (target 0.30)');
   }
 
   // -------------------------------------------------------------
