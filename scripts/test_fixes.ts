@@ -10,7 +10,7 @@ import { defaultTokenizer, UNK_ID, EOS_ID, SPECIAL_TOKENS } from '../src/slm/tok
 import { initializePretrainedModel, PREDEFINED_MODELS } from '../src/slm/predefinedModels';
 import { PREDEFINED_DATASETS } from '../src/slm/datasets';
 import { sampleFromDistribution, softmax } from '../src/slm/matrix';
-import { BASE_CORPUS } from '../src/slm/corpus';
+import { BASE_CORPUS, ENGLISH_LEARNING_CORPUS } from '../src/slm/corpus';
 import {
   evaluateTurn,
   trainingRegimeAdvisory,
@@ -535,10 +535,13 @@ async function runTestSuite() {
     // The advisory recommends LoRA as the default, so that recommendation has
     // to be true of the engine: the default must actually lower held-out loss
     // (sentences held out of fine-tuning entirely, scored with the neural
-    // distribution alone). `diag_script.ts` section 12 covers the other half —
-    // that the full retrain buys no measurable held-out gain over LoRA — under
-    // pinned seeds, because mode-vs-mode differences are smaller than the
-    // run-to-run spread of weight initialisation this suite cannot control.
+    // distribution alone).
+    //
+    // This is a *paired* measurement — the same model before and after its own
+    // training run. Comparing two freshly initialised models (the old shape of
+    // this test) mixed the adaptation effect with the run-to-run spread of the
+    // random weight initialisation, which is now larger than the effect itself.
+    // `diag_script.ts` section 12 repeats it under pinned seeds.
     const advisoryHeldOut = BASE_CORPUS.slice(0, 10);
     const advisoryTrain = BASE_CORPUS.slice(10);
     const ADVISORY_EPOCHS = 10; // the studio default
@@ -560,18 +563,35 @@ async function runTestSuite() {
       }
       return count > 0 ? total / count : 0;
     };
-    const stockHeldOut = heldOutCE(initializePretrainedModel(baseConfig), true);
     const trained = initializePretrainedModel(baseConfig);
+    const beforeLora = heldOutCE(trained, true);
     for (let epoch = 0; epoch < ADVISORY_EPOCHS; epoch++) {
       for (const text of advisoryTrain) {
         trained.trainStep(trained.tokenizer.encode(text, true, true), 0.015, true, 0.005);
       }
     }
-    const loraHeldOut = heldOutCE(trained, true);
+    const afterLora = heldOutCE(trained, true);
     assert(
-      stockHeldOut - loraHeldOut >= 0.3,
+      beforeLora - afterLora >= 0.3,
       'ISS-13.4: The recommended default (LoRA) really does generalise past its training sentences',
-      `pretrained ${stockHeldOut.toFixed(3)} -> LoRA ${loraHeldOut.toFixed(3)}`
+      `same model before ${beforeLora.toFixed(3)} -> after ${afterLora.toFixed(3)} (gain ${(beforeLora - afterLora).toFixed(3)} nats)`
+    );
+
+    // The other half of the advisory: a full retrain *does* reach a lower
+    // held-out loss (it backpropagates through every weight), but only by a
+    // small margin over the adapters while costing a full pass per epoch.
+    const fullModel = initializePretrainedModel(baseConfig);
+    const beforeFull = heldOutCE(fullModel, false);
+    for (let epoch = 0; epoch < ADVISORY_EPOCHS; epoch++) {
+      for (const text of advisoryTrain) {
+        fullModel.trainStep(fullModel.tokenizer.encode(text, true, true), 0.015, false, 0.005);
+      }
+    }
+    const afterFull = heldOutCE(fullModel, false);
+    assert(
+      beforeFull - afterFull >= 0.3 && beforeFull - afterFull < 3 * (beforeLora - afterLora) + 0.3,
+      'ISS-13.4b: A full retrain also generalises, but not by an order of magnitude more',
+      `same model before ${beforeFull.toFixed(3)} -> after ${afterFull.toFixed(3)} (gain ${(beforeFull - afterFull).toFixed(3)} nats vs LoRA ${(beforeLora - afterLora).toFixed(3)})`
     );
 
     // Regression guard: the advisory is useless unless the studio renders it.
@@ -624,6 +644,465 @@ async function runTestSuite() {
       'DS-2: Fine-tuned model reproduces the capability answer for the bare prompt',
       `${hits}/${keyWords.length} keywords in reply: "${reply}"`
     );
+  }
+
+  // -------------------------------------------------------------
+  // Test ISS-14: full backpropagation trains the whole network
+  // -------------------------------------------------------------
+  console.log('\n--- ISS-14: Full Backpropagation Trains Every Weight ---');
+  {
+    const m = initializePretrainedModel(baseConfig);
+    const before = {
+      wte: Float32Array.from(m.weights.wte),
+      wpe: Float32Array.from(m.weights.wpe),
+      q_proj: Float32Array.from(m.weights.layers[0].q_proj),
+      k_proj: Float32Array.from(m.weights.layers[0].k_proj),
+      v_proj: Float32Array.from(m.weights.layers[0].v_proj),
+      out_proj: Float32Array.from(m.weights.layers[0].out_proj),
+      fc1: Float32Array.from(m.weights.layers[0].fc1),
+      fc2: Float32Array.from(m.weights.layers[0].fc2),
+      ln1_gamma: Float32Array.from(m.weights.layers[0].ln1_gamma),
+      ln_f_beta: Float32Array.from(m.weights.ln_f_beta),
+    };
+    const tokens = m.tokenizer.encode(
+      `${SPECIAL_TOKENS.USER} what makes a good morning routine ${SPECIAL_TOKENS.NEWLINE}${SPECIAL_TOKENS.ASSISTANT} a gentle morning routine includes water and light .`,
+      true,
+      true
+    );
+    for (let i = 0; i < 3; i++) m.trainStep(tokens, 0.02, false, 0.001);
+
+    const moved = (name: keyof typeof before, after: Float32Array) => {
+      const b = before[name];
+      for (let i = 0; i < b.length; i++) if (Math.abs(b[i] - after[i]) > 1e-7) return true;
+      return false;
+    };
+    const unchanged: string[] = [];
+    if (!moved('wte', m.weights.wte)) unchanged.push('wte');
+    if (!moved('wpe', m.weights.wpe)) unchanged.push('wpe');
+    if (!moved('q_proj', m.weights.layers[0].q_proj)) unchanged.push('q_proj');
+    if (!moved('k_proj', m.weights.layers[0].k_proj)) unchanged.push('k_proj');
+    if (!moved('v_proj', m.weights.layers[0].v_proj)) unchanged.push('v_proj');
+    if (!moved('out_proj', m.weights.layers[0].out_proj)) unchanged.push('out_proj');
+    if (!moved('fc1', m.weights.layers[0].fc1)) unchanged.push('fc1');
+    if (!moved('fc2', m.weights.layers[0].fc2)) unchanged.push('fc2');
+    if (!moved('ln1_gamma', m.weights.layers[0].ln1_gamma)) unchanged.push('ln1_gamma');
+    if (!moved('ln_f_beta', m.weights.ln_f_beta)) unchanged.push('ln_f_beta');
+    assert(
+      unchanged.length === 0,
+      'ISS-14.1: Full training updates embeddings, projections, FFN and LayerNorms (not only lm_head)',
+      `still frozen: ${unchanged.join(', ') || 'none'}`
+    );
+
+    // The gradient must be a *real* gradient of the reported objective: with a
+    // correct gradient, repeated steps on one sequence reduce its neural loss.
+    const probe = initializePretrainedModel(baseConfig);
+    const lossOf = (model: SmallLanguageModel, ts: number[]): number => {
+      let res = 0;
+      for (let i = 0; i < 4; i++) res = model.trainStep(ts, 0.02, false, 0.001).loss;
+      return res;
+    };
+    const probeTokens = probe.tokenizer.encode('the children are playing football in the park .', true, true);
+    const startLoss = lossOf(probe, probeTokens);
+    for (let i = 0; i < 6; i++) lossOf(probe, probeTokens);
+    const endLoss = lossOf(probe, probeTokens);
+    assert(
+      endLoss < startLoss * 0.6,
+      'ISS-14.2: Full-mode gradient descent really fits the sequence it trains on',
+      `loss ${startLoss.toFixed(3)} -> ${endLoss.toFixed(3)}`
+    );
+    assert(
+      probe.weights.layers.every(
+        (l) =>
+          l.lora_q_B.every((w) => Math.abs(w) <= 1e-6) &&
+          l.lora_v_B.every((w) => Math.abs(w) <= 1e-6)
+      ),
+      'ISS-14.3: Full training leaves the LoRA adapters untouched (modes stay distinct)'
+    );
+  }
+
+  // -------------------------------------------------------------
+  // Test ISS-15: the trainable-parameter count matches the claim
+  // -------------------------------------------------------------
+  console.log('\n--- ISS-15: Trainable Parameter Accounting ---');
+  {
+    const m = initializePretrainedModel(baseConfig);
+    const stats = m.getMemoryStats();
+    const lora = m.countParameters(true);
+    const full = m.countParameters(false);
+    assert(
+      lora.trainable === stats.loraParams && lora.total === stats.totalParams,
+      'ISS-15.1: LoRA mode reports exactly the adapter parameters as trainable',
+      `${lora.trainable} of ${lora.total}`
+    );
+    assert(
+      full.trainable === stats.totalParams - stats.loraParams && full.trainable > 10 * stats.loraParams,
+      'ISS-15.2: Full mode reports every base weight as trainable (not just the LM head)',
+      `${full.trainable} trainable of ${full.total}`
+    );
+    assert(
+      full.trainable > stats.lmHeadParams,
+      'ISS-15.3: The full-mode count is larger than the LM head alone',
+      `full ${full.trainable} vs lm_head ${stats.lmHeadParams}`
+    );
+  }
+
+  // -------------------------------------------------------------
+  // Test ISS-16: the neural/memory blend is measured, not hard-coded
+  // -------------------------------------------------------------
+  console.log('\n--- ISS-16: Adaptive Neural/Memory Blend ---');
+  {
+    const m = initializePretrainedModel(baseConfig);
+    assert(
+      Math.abs(m.getNeuralMix() - 0.08) < 1e-9,
+      'ISS-16.1: An untrained model keeps the memory-dominated floor of 8%',
+      `mix ${m.getNeuralMix()}`
+    );
+
+    const heldOut = ENGLISH_LEARNING_CORPUS.slice(0, 16);
+    const train = ENGLISH_LEARNING_CORPUS.slice(16, 70);
+    const untrained = m.calibrateNeuralMix(heldOut);
+    for (let epoch = 0; epoch < 3; epoch++) {
+      for (const text of train) {
+        m.trainStep(m.tokenizer.encode(text, true, true), 0.02, false, 0.001, false);
+      }
+    }
+    const trained = m.calibrateNeuralMix(heldOut);
+    assert(
+      trained.neuralPerplexity < untrained.neuralPerplexity,
+      'ISS-16.2: Training genuinely sharpens the network on held-out text',
+      `neural ppl ${untrained.neuralPerplexity.toFixed(1)} -> ${trained.neuralPerplexity.toFixed(1)}`
+    );
+    assert(
+      trained.mix > untrained.mix,
+      'ISS-16.3: The fitted blend gives a better network more influence (mix rises)',
+      `${untrained.mix} -> ${trained.mix}`
+    );
+    assert(
+      Math.abs(m.getNeuralMix() - trained.mix) < 1e-9 && trained.mix <= 0.7,
+      'ISS-16.4: The calibrated weight is installed on the model for generation',
+      `mix ${m.getNeuralMix()}`
+    );
+
+    // The blend weight must be visible in generation, not just stored.
+    const next = (mix: number) => {
+      m.setNeuralMix(mix);
+      const prompt = m.tokenizer.formatConversationPrompt('how are you today');
+      const result = m.generate(prompt, { temperature: 0.7, topK: 5, topP: 0.95, repetitionPenalty: 1.1, maxNewTokens: 1 });
+      return result.tokens[0].topCandidates.map((c) => `${c.id}:${c.prob.toFixed(4)}`).join(',');
+    };
+    assert(
+      next(0.02) !== next(0.7),
+      'ISS-16.5: Changing the mix changes the sampling distribution (the network is not decorative)',
+      'top candidates differ between a 2% and a 70% neural share'
+    );
+    m.setNeuralMix(0.08);
+  }
+
+  // -------------------------------------------------------------
+  // Test ISS-17: loss is measured before the memory observes
+  // -------------------------------------------------------------
+  console.log('\n--- ISS-17: Loss Is Measured Before Memory Observation ---');
+  {
+    const m = initializePretrainedModel(baseConfig);
+    const novel =
+      `${SPECIAL_TOKENS.USER} tell me about quokkas on the island ${SPECIAL_TOKENS.NEWLINE}${SPECIAL_TOKENS.ASSISTANT} quokkas are small friendly animals that live near the water .`;
+    const tokens = m.tokenizer.encode(novel, true, true);
+    const V = m.config.vocabSize;
+    const probs = new Float32Array(V);
+    const mem = new Float32Array(V);
+    const mix = m.getNeuralMix();
+
+    // Compute the blended NLL by hand, from the tables as they are *now* (i.e.
+    // before this sequence is ever observed).
+    const pre = m.forward(tokens, false);
+    let preBlended = 0;
+    let counted = 0;
+    for (let i = 0; i < pre.seqLen - 1; i++) {
+      const target = tokens[i + 1];
+      if (target === 0) continue;
+      softmax(pre.logits.subarray(i * V, (i + 1) * V), probs, 1.0);
+      m.memory.distribution(i >= 1 ? tokens[i - 1] : 2, tokens[i], mem);
+      preBlended += -Math.log(Math.max(1e-8, mix * probs[target] + (1 - mix) * mem[target]));
+      counted++;
+    }
+    preBlended /= counted;
+
+    const memoryBefore = m.memory.size;
+    const step = m.trainStep(tokens, 0.0, false, 0.0); // zero lr: measure without learning
+    const memoryAfter = m.memory.size;
+
+    // After the call, observing the same sequence must now make it *cheaper*.
+    let postBlended = 0;
+    counted = 0;
+    for (let i = 0; i < pre.seqLen - 1; i++) {
+      const target = tokens[i + 1];
+      if (target === 0) continue;
+      softmax(pre.logits.subarray(i * V, (i + 1) * V), probs, 1.0);
+      m.memory.distribution(i >= 1 ? tokens[i - 1] : 2, tokens[i], mem);
+      postBlended += -Math.log(Math.max(1e-8, mix * probs[target] + (1 - mix) * mem[target]));
+      counted++;
+    }
+    postBlended /= counted;
+
+    assert(
+      memoryAfter > memoryBefore,
+      'ISS-17.1: The training step does teach the memory layer about the sequence',
+      `memory size ${memoryBefore} -> ${memoryAfter}`
+    );
+    assert(
+      Math.abs(step.blendedLoss - preBlended) < 1e-5,
+      'ISS-17.2: Reported loss is the pre-observation value, not the post-memorisation one',
+      `reported ${step.blendedLoss.toFixed(4)} vs pre-observation ${preBlended.toFixed(4)}`
+    );
+    assert(
+      postBlended < preBlended - 1e-4,
+      'ISS-17.3: Observing afterwards really does lower the next measurement (the check has teeth)',
+      `pre ${preBlended.toFixed(4)} -> post ${postBlended.toFixed(4)}`
+    );
+  }
+
+  // -------------------------------------------------------------
+  // Test ISS-18/ISS-19: the reported metric is the objective
+  // -------------------------------------------------------------
+  console.log('\n--- ISS-18/19: Reported Loss Equals the Optimized Objective ---');
+  {
+    const m = initializePretrainedModel(baseConfig);
+    const tokens = m.tokenizer.encode(
+      `${SPECIAL_TOKENS.USER} how do I stay focused ${SPECIAL_TOKENS.NEWLINE}${SPECIAL_TOKENS.ASSISTANT} work in short focused intervals and then rest .`,
+      true,
+      true
+    );
+    const V = m.config.vocabSize;
+    const probs = new Float32Array(V);
+    const { logits, seqLen } = m.forward(tokens, true);
+    let neuralCE = 0;
+    let count = 0;
+    for (let i = 0; i < seqLen - 1; i++) {
+      const target = tokens[i + 1];
+      if (target === 0) continue;
+      softmax(logits.subarray(i * V, (i + 1) * V), probs, 1.0);
+      neuralCE += -Math.log(Math.max(1e-8, probs[target]));
+      count++;
+    }
+    neuralCE /= count;
+
+    const report = m.trainStep(tokens, 0.0, true, 0.0);
+    assert(
+      Math.abs(report.loss - neuralCE) < 1e-5,
+      'ISS-19.1: LoRA mode reports the neural cross-entropy its gradient descends',
+      `reported ${report.loss.toFixed(4)} vs neural CE ${neuralCE.toFixed(4)}`
+    );
+    assert(
+      report.blendedLoss >= report.loss - 1e-6 && report.blendedLoss > report.loss + 0.05,
+      'ISS-19.2: The blended NLL is reported separately and is not the objective',
+      `neural ${report.loss.toFixed(3)} vs blended ${report.blendedLoss.toFixed(3)}`
+    );
+    assert(
+      Math.abs(report.neuralLoss - report.loss) < 1e-9,
+      'ISS-19.3: neuralLoss and loss name the same number',
+      `${report.neuralLoss.toFixed(4)}`
+    );
+  }
+
+  // -------------------------------------------------------------
+  // Test ISS-20: retrieval is reported, and the studio scores held-out turns
+  // -------------------------------------------------------------
+  console.log('\n--- ISS-20: Retrieval Is Reported, Held-Out Evaluation Exists ---');
+  {
+    const m = initializePretrainedModel(baseConfig);
+    const turn = PREDEFINED_DATASETS[0].turns[0];
+    const text = `${SPECIAL_TOKENS.USER} ${turn.user} ${SPECIAL_TOKENS.NEWLINE}${SPECIAL_TOKENS.ASSISTANT} ${turn.assistant}`;
+    for (let epoch = 0; epoch < 4; epoch++) {
+      m.trainStep(m.tokenizer.encode(text, true, true), 0.02, true, 0.005);
+    }
+    m.generate(m.tokenizer.formatConversationPrompt(turn.user), {
+      temperature: 0.4, topK: 10, topP: 0.9, repetitionPenalty: 1.1, maxNewTokens: 20,
+    }, true);
+    const tunedTrace = m.getLastGenerationTrace();
+    assert(
+      tunedTrace.usedRetrieval && tunedTrace.retrievalTokens > 0,
+      'ISS-20.1: A reply replayed from a learned dataset answer is reported as retrieval',
+      `${tunedTrace.retrievalTokens} retrieval / ${tunedTrace.generatedTokens} generated tokens`
+    );
+
+    const fresh = initializePretrainedModel(baseConfig);
+    fresh.generate(fresh.tokenizer.formatConversationPrompt('what is the weather like tomorrow'), {
+      temperature: 0.4, topK: 10, topP: 0.9, repetitionPenalty: 1.1, maxNewTokens: 12,
+    }, true);
+    const freshTrace = fresh.getLastGenerationTrace();
+    assert(
+      !freshTrace.usedRetrieval && freshTrace.generatedTokens > 0,
+      'ISS-20.2: An untrained prompt is reported as generated, not as retrieval',
+      `${freshTrace.retrievalTokens} retrieval / ${freshTrace.generatedTokens} generated tokens`
+    );
+
+    const studioSource = readFileSync(
+      new URL('../src/components/FineTuningStudio.tsx', import.meta.url),
+      'utf8'
+    );
+    assert(
+      /const heldOutTurns = /.test(studioSource) &&
+        /heldOutLoss/.test(studioSource) &&
+        /neuralInfluence/.test(studioSource),
+      'ISS-20.3: The studio reports held-out loss and the neural influence it measured',
+      'FineTuningStudio contains the held-out split, held-out loss and neural-influence readout'
+    );
+  }
+
+  // -------------------------------------------------------------
+  // Test ISS-21: growing the vocabulary preserves training
+  // -------------------------------------------------------------
+  console.log('\n--- ISS-21: Vocabulary Growth Preserves Trained Weights ---');
+  {
+    const m = initializePretrainedModel(baseConfig);
+    const turn = PREDEFINED_DATASETS[0].turns[1];
+    const text = `${SPECIAL_TOKENS.USER} ${turn.user} ${SPECIAL_TOKENS.NEWLINE}${SPECIAL_TOKENS.ASSISTANT} ${turn.assistant}`;
+    for (let epoch = 0; epoch < 4; epoch++) {
+      m.trainStep(m.tokenizer.encode(text, true, true), 0.02, true, 0.005);
+    }
+    const trained = m.isFineTuned();
+    const beforeQ = Float32Array.from(m.weights.layers[0].q_proj);
+    const beforeAdapter = Float32Array.from(m.weights.layers[0].lora_q_B);
+    const vocabBefore = m.config.vocabSize;
+
+    const learned = defaultTokenizer.learnWords(['quokkas', 'xylophonically', 'marsupials']);
+    const grew = m.resizeVocabulary(defaultTokenizer.vocabSize);
+
+    let sameQ = true;
+    let sameAdapter = true;
+    for (let i = 0; i < beforeQ.length; i++) if (m.weights.layers[0].q_proj[i] !== beforeQ[i]) sameQ = false;
+    for (let i = 0; i < beforeAdapter.length; i++) if (m.weights.layers[0].lora_q_B[i] !== beforeAdapter[i]) sameAdapter = false;
+
+    assert(
+      learned > 0 && grew && m.config.vocabSize > vocabBefore,
+      'ISS-21.1: New dataset words grow the model in place',
+      `vocab ${vocabBefore} -> ${m.config.vocabSize}`
+    );
+    assert(
+      sameQ && sameAdapter,
+      'ISS-21.2: Every trained weight survives the resize unchanged',
+      `q_proj ${sameQ ? 'preserved' : 'CHANGED'}, adapter ${sameAdapter ? 'preserved' : 'CHANGED'}`
+    );
+    assert(
+      m.weights.lm_head.length === m.config.vocabSize * m.config.dModel &&
+        m.weights.wte.length === m.config.vocabSize * m.config.dModel,
+      'ISS-21.3: Embedding table and LM head cover the grown vocabulary',
+      `lm_head ${m.weights.lm_head.length} floats`
+    );
+    assert(
+      m.isFineTuned() === trained,
+      'ISS-21.4: The fine-tuned state survives the resize',
+      `isFineTuned ${m.isFineTuned()}`
+    );
+    m.resetToBase();
+    assert(
+      !m.isFineTuned() && m.config.vocabSize > vocabBefore,
+      'ISS-21.5: resetToBase still restores the (resized) base snapshot',
+      `vocab ${m.config.vocabSize}`
+    );
+  }
+
+  // -------------------------------------------------------------
+  // Test ISS-22: the base model is pre-trained on real English
+  // -------------------------------------------------------------
+  console.log('\n--- ISS-22: Pre-Training Teaches Real English Structure ---');
+  {
+    assert(
+      ENGLISH_LEARNING_CORPUS.length >= 150,
+      'ISS-22.1: The built-in English corpus is large enough to train on',
+      `${ENGLISH_LEARNING_CORPUS.length} sentences`
+    );
+    const raw = new SmallLanguageModel({ ...baseConfig, vocabSize: defaultTokenizer.vocabSize }, defaultTokenizer);
+    const pretrained = initializePretrainedModel(baseConfig);
+    const V = pretrained.config.vocabSize;
+    const probs = new Float32Array(V);
+    const ce = (model: SmallLanguageModel, texts: string[]): number => {
+      let total = 0;
+      let count = 0;
+      for (const text of texts) {
+        const tokens = model.tokenizer.encode(text, true, true);
+        const { logits, seqLen } = model.forward(tokens, false);
+        for (let i = 0; i < seqLen - 1; i++) {
+          const target = tokens[i + 1];
+          if (target === 0) continue;
+          softmax(logits.subarray(i * V, (i + 1) * V), probs, 1.0);
+          total += -Math.log(Math.max(1e-8, probs[target]));
+          count++;
+        }
+      }
+      return total / count;
+    };
+    const sample = ENGLISH_LEARNING_CORPUS.slice(100, 120);
+    const rawCE = ce(raw, sample);
+    const pretrainedCE = ce(pretrained, sample);
+    assert(
+      pretrainedCE < rawCE - 0.5,
+      'ISS-22.2: Pre-training measurably lowers held-out loss versus random weights',
+      `random ${rawCE.toFixed(3)} -> pretrained ${pretrainedCE.toFixed(3)} (${(rawCE - pretrainedCE).toFixed(3)} nats)`
+    );
+  }
+
+  // -------------------------------------------------------------
+  // Test ISS-23: sliding-window positions are anchored, not restarted
+  // -------------------------------------------------------------
+  console.log('\n--- ISS-23: Positional Window Anchoring ---');
+  {
+    const m = initializePretrainedModel(baseConfig);
+    const { maxSeqLen, dModel } = m.config;
+    // A probe model whose only non-zero weights are the position embeddings:
+    // with every block weight zeroed the residual stream never changes, so the
+    // values in scratchX after forward() *are* wte[token] + wpe[position].
+    for (const l of m.weights.layers) {
+      l.q_proj.fill(0); l.k_proj.fill(0); l.v_proj.fill(0); l.out_proj.fill(0);
+      l.fc1.fill(0); l.fc1_b.fill(0); l.fc2.fill(0); l.fc2_b.fill(0);
+      l.ln1_gamma.fill(0); l.ln1_beta.fill(0); l.ln2_gamma.fill(0); l.ln2_beta.fill(0);
+    }
+    m.weights.ln_f_gamma.fill(0);
+    m.weights.ln_f_beta.fill(0);
+    m.weights.wte.fill(0);
+    for (let pos = 0; pos < maxSeqLen; pos++) {
+      m.weights.wpe.fill(pos + 1, pos * dModel, (pos + 1) * dModel);
+    }
+
+    const scratchX = (m as unknown as { scratchX: Float32Array }).scratchX;
+    // Token i must sit at position i regardless of the sequence length: growing
+    // a sequence (which is exactly what decoding does) must never re-number the
+    // tokens already in it.
+    const positionsMatch = (count: number): boolean => {
+      for (let i = 0; i < count; i++) {
+        if (Math.abs(scratchX[i * dModel] - (i + 1)) > 1e-6) return false;
+      }
+      return true;
+    };
+    m.forward(new Array(10).fill(10));
+    const shortPositions = positionsMatch(10);
+    m.forward(new Array(30).fill(10));
+    const longPositions = positionsMatch(30);
+    assert(
+      shortPositions && longPositions,
+      'ISS-23.1: Positions are window-relative and stable as the sequence grows',
+      `10-token and 30-token sequences both map token i to position i`
+    );
+
+    // A sequence longer than the context window is windowed to maxSeqLen and
+    // must stay inside the positional table (the old bug's failure mode was
+    // indexing wpe past its end / mismatching the loss shift).
+    const overLong = m.forward(new Array(maxSeqLen + 25).fill(10));
+    let inRange = true;
+    for (let i = 0; i < overLong.seqLen; i++) {
+      const value = scratchX[i * dModel];
+      if (value < 1 || value > maxSeqLen) inRange = false;
+    }
+    assert(
+      overLong.seqLen === maxSeqLen && inRange,
+      'ISS-23.2: An over-long sequence is windowed without leaving the positional table',
+      `seqLen ${overLong.seqLen} of ${maxSeqLen}, positions within 1..${maxSeqLen}`
+    );
+    const frozen =
+      m.weights.wte.every((w) => w === 0) &&
+      m.weights.wpe.some((w) => w !== 0) &&
+      m.weights.layers.every((l) => l.fc1.every((w) => w === 0));
+    assert(frozen, 'ISS-23.3: The probe isolates positional embeddings from every other weight');
   }
 
   console.log('\n=======================================================');

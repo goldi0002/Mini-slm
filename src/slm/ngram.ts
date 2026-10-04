@@ -280,6 +280,27 @@ export class NgramLanguageModel {
     }
   }
 
+  /**
+   * Follow a vocabulary that grew underneath the tables.
+   *
+   * Trigram contexts are keyed by `prev2 * vocabSize + prev1`, so growing the
+   * vocabulary silently invalidates every stored key. Rewriting the keys is what
+   * lets a trained memory layer survive the addition of new words instead of
+   * being discarded with the model (ISS-21).
+   */
+  public remapVocabSize(newVocabSize: number): void {
+    const oldVocabSize = this.vocabSize;
+    if (newVocabSize <= oldVocabSize) return;
+    const remapped = new Map<number, Map<number, number>>();
+    for (const [key, counts] of this.tables.tri) {
+      const prev2 = Math.floor(key / oldVocabSize);
+      const prev1 = key - prev2 * oldVocabSize;
+      remapped.set(prev2 * newVocabSize + prev1, counts);
+    }
+    this.tables.tri = remapped;
+    this.vocabSize = newVocabSize;
+  }
+
   private static copyNested(src: Map<number, Map<number, number>>): Map<number, Map<number, number>> {
     const dst = new Map<number, Map<number, number>>();
     for (const [k, m] of src) dst.set(k, new Map(m));
