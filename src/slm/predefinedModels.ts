@@ -61,19 +61,19 @@ ensureVocabulary();
 
 export const PREDEFINED_MODELS: ModelConfig[] = [
   {
-    id: 'assistant-48',
-    name: 'Assistant-48 (Balanced Chat)',
-    tagline: '2 Layers • 48-dim • 4 Heads • ~1.8 MB RAM • Fluent Daily Dialogue',
+    id: 'minislm-1m',
+    name: 'MiniSLM 1.4M (Fast Adapt)',
+    tagline: '4 Layers • 192-dim • 6 Heads • 384 FFN • ~1.4M params • Fast LoRA + memory learning',
     vocabSize: defaultTokenizer.vocabSize,
-    dModel: 48,
-    nHeads: 4,
-    nLayers: 2,
-    dFfn: 96,
+    dModel: 192,
+    nHeads: 6,
+    nLayers: 4,
+    dFfn: 384,
     // Context holds the reply as well as the prompt: a ~40 token answer plus
     // the recent turns needs more than the 64 this started with.
-    maxSeqLen: 96,
-    loraRank: 4,
-    loraAlpha: 8,
+    maxSeqLen: 128,
+    loraRank: 16,
+    loraAlpha: 32,
   },
   {
     id: 'nanolm-light',
@@ -127,7 +127,7 @@ export const PREDEFINED_MODELS: ModelConfig[] = [
  *    the forward pass has crossed some loss threshold is left as the next
  *    performance optimisation, once a working forward pass exists.
  */
-const WARMUP_EPOCHS = 2;
+const WARMUP_EPOCHS = 0;
 
 /**
  * Measured, not guessed: one pass at this rate lowers held-out cross-entropy
@@ -135,7 +135,7 @@ const WARMUP_EPOCHS = 2;
  * ~6.6. Gradients are globally clipped (see GRADIENT_CLIP_NORM), which is what
  * makes the higher rate stable instead of divergent.
  */
-const WARMUP_LR = 0.1;
+const WARMUP_LR = 0.0;
 
 export function initializePretrainedModel(config: ModelConfig): SmallLanguageModel {
   ensureVocabulary();
@@ -145,17 +145,11 @@ export function initializePretrainedModel(config: ModelConfig): SmallLanguageMod
   const conversationalCorpus = PRETRAIN_CORPUS;
   model.learnCorpus(conversationalCorpus, 1);
 
-  const englishPass = ENGLISH_LEARNING_CORPUS.map((text) =>
-    defaultTokenizer.encode(text, true, true)
-  );
-  for (let epoch = 0; epoch < WARMUP_EPOCHS; epoch++) {
-    const lr = WARMUP_LR * (1 - epoch / (WARMUP_EPOCHS + 1));
-    for (let i = epoch; i < englishPass.length; i += WARMUP_EPOCHS) {
-      model.trainStep(englishPass[i], lr, false, 0.001, false);
-    }
-  }
+  // Skip full neural warm-up for the 1M+ browser model. The memory layer
+  // provides the deterministic conversational prior immediately; LoRA training
+  // in the Studio performs the expensive neural adaptation only when requested.
 
-  // Save the warm-up state (weights + memory) as the official Base Snapshot
+  // Save the initialized state (weights + memory) as the official Base Snapshot
   model.saveBaseSnapshot();
 
   return model;
