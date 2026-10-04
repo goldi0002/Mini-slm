@@ -453,6 +453,8 @@ export const FineTuningStudio: React.FC<FineTuningStudioProps> = ({
       currentLoss: 0,
       currentPerplexity: 0,
       currentBlendedLoss: 0,
+      epochAverageLoss: 0,
+      targetReached: false,
       sampleOutputs: [],
     });
     setEvalState({ isEvaluating: false, summary: null });
