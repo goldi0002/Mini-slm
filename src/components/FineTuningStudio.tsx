@@ -144,7 +144,9 @@ export function evaluateTurn(
  * gap saturates after a few epochs while each additional epoch costs a full
  * backprop pass over the entire network and refits the turns already seen.
  */
-export const FULL_MODE_ADVISORY_EPOCHS = 4;
+export const FULL_MODE_ADVISORY_EPOCHS = 25;
+export const FULL_RETRAIN_TARGET_LR = 0.3;
+export const DEFAULT_TRAINING_EPOCHS = 70;
 
 /**
  * Advisory for a hyperparameter set that is expected to cost the user more
@@ -155,7 +157,7 @@ export const FULL_MODE_ADVISORY_EPOCHS = 4;
  */
 export function trainingRegimeAdvisory(hyperparams: TrainingHyperparams): string | null {
   if (!hyperparams.loraMode && hyperparams.epochs >= FULL_MODE_ADVISORY_EPOCHS) {
-    return `Full retraining for ${hyperparams.epochs} epochs backpropagates through every weight in the network. It measured a lower held-out loss than the LoRA adapter, but most of that gain arrives in the first few epochs — later epochs cost a full backprop pass each and mostly refit turns the model has already seen. Keep a full retrain short (1–3 epochs), or switch to LoRA.`;
+    return `Full retraining for ${hyperparams.epochs} epochs is intentionally compute-heavy. The 0.30 training target is an aggressive fit target, so expect many passes on tiny datasets and watch held-out loss separately for overfitting.`;
   }
   return null;
 }
@@ -183,11 +185,11 @@ export const FineTuningStudio: React.FC<FineTuningStudioProps> = ({
 }) => {
   const [datasetScale, setDatasetScale] = useState<'standard' | 'expanded' | 'large'>('standard');
   const [hyperparams, setHyperparams] = useState<TrainingHyperparams>({
-    epochs: 10,
-    learningRate: 0.015,
+    epochs: DEFAULT_TRAINING_EPOCHS,
+    learningRate: FULL_RETRAIN_TARGET_LR,
     batchSize: 1,
-    weightDecay: 0.005,
-    loraMode: true,
+    weightDecay: 0.0,
+    loraMode: false,
     loraRank: model.config.loraRank,
   });
 
@@ -195,13 +197,15 @@ export const FineTuningStudio: React.FC<FineTuningStudioProps> = ({
     isTraining: false,
     isPaused: false,
     currentEpoch: 0,
-    totalEpochs: 10,
+    totalEpochs: DEFAULT_TRAINING_EPOCHS,
     currentStep: 0,
     totalSteps: 0,
     lossHistory: [],
     currentLoss: 0,
     currentPerplexity: 0,
     currentBlendedLoss: 0,
+    epochAverageLoss: 0,
+    targetReached: false,
     sampleOutputs: [],
   });
 
@@ -287,11 +291,14 @@ export const FineTuningStudio: React.FC<FineTuningStudioProps> = ({
       currentPerplexity: 0,
       currentBlendedLoss: 0,
       sampleOutputs: [],
+      epochAverageLoss: 0,
+      targetReached: false,
     });
 
     const lossHistory: LossPoint[] = [];
     let stepCount = 0;
     let targetReached = false;
+    let lastEpochAverageLoss = Infinity;
 
     for (let epoch = 1; epoch <= totalEpochs; epoch++) {
       if (!isTrainingRef.current) break;
@@ -358,15 +365,20 @@ export const FineTuningStudio: React.FC<FineTuningStudioProps> = ({
         }
 
         // Keep browser UI interactive
-        if (neuralLoss <= TARGET_LOSS) {
-          targetReached = true;
-          break;
-        }
-
         if (stepCount % 2 === 0) {
           await new Promise((r) => setTimeout(r, 8));
         }
       }
+
+      lastEpochAverageLoss = dataset.length > 0 ? epochLossSum / dataset.length : 0;
+      targetReached = lastEpochAverageLoss <= TARGET_LOSS;
+
+      setTrainingState((prev) => ({
+        ...prev,
+        currentEpoch: epoch,
+        epochAverageLoss: lastEpochAverageLoss,
+        targetReached,
+      }));
 
       if (!isTrainingRef.current || targetReached) break;
 
@@ -404,6 +416,8 @@ export const FineTuningStudio: React.FC<FineTuningStudioProps> = ({
       isTraining: false,
       isPaused: false,
       currentBlendedLoss: 0,
+      epochAverageLoss: lastEpochAverageLoss === Infinity ? 0 : lastEpochAverageLoss,
+      targetReached,
     }));
 
     if (completedSuccessfully) {
@@ -439,6 +453,8 @@ export const FineTuningStudio: React.FC<FineTuningStudioProps> = ({
       currentLoss: 0,
       currentPerplexity: 0,
       currentBlendedLoss: 0,
+      epochAverageLoss: 0,
+      targetReached: false,
       sampleOutputs: [],
     });
     setEvalState({ isEvaluating: false, summary: null });
@@ -755,7 +771,7 @@ export const FineTuningStudio: React.FC<FineTuningStudioProps> = ({
               <div className="grid grid-cols-2 gap-2 text-xs">
                 <button
                   type="button"
-                  onClick={() => setHyperparams({ ...hyperparams, loraMode: true })}
+                  onClick={() => setHyperparams({ ...hyperparams, loraMode: true, learningRate: 0.03, epochs: Math.min(hyperparams.epochs, 50) })}
                   disabled={trainingState.isTraining}
                   className={`p-2 rounded-lg border font-medium text-center transition-all cursor-pointer ${
                     hyperparams.loraMode
@@ -767,7 +783,7 @@ export const FineTuningStudio: React.FC<FineTuningStudioProps> = ({
                 </button>
                 <button
                   type="button"
-                  onClick={() => setHyperparams({ ...hyperparams, loraMode: false })}
+                  onClick={() => setHyperparams({ ...hyperparams, loraMode: false, learningRate: FULL_RETRAIN_TARGET_LR, epochs: Math.max(hyperparams.epochs, DEFAULT_TRAINING_EPOCHS) })}
                   disabled={trainingState.isTraining}
                   className={`p-2 rounded-lg border font-medium text-center transition-all cursor-pointer ${
                     !hyperparams.loraMode
@@ -779,6 +795,10 @@ export const FineTuningStudio: React.FC<FineTuningStudioProps> = ({
                 </button>
               </div>
             </div>
+
+            <p className="text-[11px] text-slate-500">
+              The training target is <span className="font-semibold text-emerald-700">0.30 response loss</span>. It is an in-sample fit target; held-out loss below is the generalization check.
+            </p>
 
             {regimeAdvisory && (
               <div className="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 p-2.5 text-[11px] leading-relaxed text-amber-800">
@@ -794,9 +814,9 @@ export const FineTuningStudio: React.FC<FineTuningStudioProps> = ({
               </div>
               <input
                 type="range"
-                min="3"
-                max="25"
-                step="1"
+                min="5"
+                max="300"
+                step="5"
                 disabled={trainingState.isTraining}
                 value={hyperparams.epochs}
                 onChange={(e) =>
@@ -815,9 +835,9 @@ export const FineTuningStudio: React.FC<FineTuningStudioProps> = ({
               </div>
               <input
                 type="range"
-                min="0.002"
-                max="0.04"
-                step="0.002"
+                min="0.01"
+                max="0.30"
+                step="0.01"
                 disabled={trainingState.isTraining}
                 value={hyperparams.learningRate}
                 onChange={(e) =>
@@ -849,9 +869,15 @@ export const FineTuningStudio: React.FC<FineTuningStudioProps> = ({
                   </span>
                 </div>
               )}
-              {!trainingState.isTraining && trainingState.currentLoss > 0 && trainingState.currentLoss <= TARGET_LOSS && (
-                <span className="rounded-full bg-emerald-50 border border-emerald-200 px-2 py-1 text-[10px] font-semibold text-emerald-700">
-                  Target {TARGET_LOSS.toFixed(2)} reached
+              {!trainingState.isTraining && (
+                <span className={`rounded-full px-2 py-1 text-[10px] font-semibold border ${
+                  trainingState.targetReached
+                    ? 'bg-emerald-50 border-emerald-200 text-emerald-700'
+                    : 'bg-amber-50 border-amber-200 text-amber-700'
+                }`}>
+                  {trainingState.targetReached
+                    ? `Training target ${TARGET_LOSS.toFixed(2)} reached`
+                    : `Target ${TARGET_LOSS.toFixed(2)} not reached`}
                 </span>
               )}
             </div>
@@ -862,6 +888,17 @@ export const FineTuningStudio: React.FC<FineTuningStudioProps> = ({
                 <span className="text-[11px] text-slate-500 block">Current Loss</span>
                 <span className="text-sm sm:text-base font-bold font-mono text-indigo-600 break-all">
                   {trainingState.currentLoss ? trainingState.currentLoss.toFixed(4) : '--'}
+                </span>
+              </div>
+
+              <div className="bg-slate-50 border border-slate-200 rounded-lg p-2.5">
+                <span className="text-[11px] text-slate-500 block">Epoch Avg Loss</span>
+                <span className={`text-sm sm:text-base font-bold font-mono break-all ${
+                  trainingState.epochAverageLoss > 0 && trainingState.epochAverageLoss <= TARGET_LOSS
+                    ? 'text-emerald-600'
+                    : 'text-indigo-600'
+                }`}>
+                  {trainingState.epochAverageLoss ? trainingState.epochAverageLoss.toFixed(4) : '--'}
                 </span>
               </div>
 
