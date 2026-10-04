@@ -286,6 +286,13 @@ export class SmallLanguageModel {
   // browser fine-tuning without the 2x extra memory cost of full Adam.
   private optimizerVelocity = new WeakMap<Float32Array, Float32Array>();
   private optimizerVelocityBuffers: Float32Array[] = [];
+  // LoRA adapters use Adam-style first/second moments for faster convergence.
+  // The adapter tensors are tiny compared with the frozen base, so this adds
+  // very little browser memory while avoiding the long plateaus seen with
+  // momentum SGD on response-only dialogue loss.
+  private optimizerSecondMoment = new WeakMap<Float32Array, Float32Array>();
+  private optimizerSecondMomentBuffers: Float32Array[] = [];
+  private optimizerStep = 0;
 
   // Gradient buffers for the full backpropagation path (see backwardFull).
   private weightGrads: WeightGradients | null = null;
@@ -623,6 +630,9 @@ export class SmallLanguageModel {
     // leak into a fresh run after the user restores the base checkpoint.
     this.optimizerVelocity = new WeakMap<Float32Array, Float32Array>();
     this.optimizerVelocityBuffers = [];
+    this.optimizerSecondMoment = new WeakMap<Float32Array, Float32Array>();
+    this.optimizerSecondMomentBuffers = [];
+    this.optimizerStep = 0;
 
     // The weights are back at the base checkpoint, so no adaptation is left.
     this.fullFineTuneApplied = false;
@@ -986,6 +996,7 @@ export class SmallLanguageModel {
     }
     // Momentum keeps one velocity buffer per trainable tensor.
     for (const velocity of this.optimizerVelocityBuffers) floats += velocity.length;
+    for (const moment of this.optimizerSecondMomentBuffers) floats += moment.length;
 
     // Full backpropagation holds one gradient buffer per base weight.
     const grads = this.weightGrads;
@@ -1015,22 +1026,31 @@ export class SmallLanguageModel {
   ): void {
     const invCount = targetCount > 0 ? 1 / targetCount : 0;
     const lr = learningRate * ADAPTER_LR_MULTIPLIER;
-    const beta = 0.9;
+    const beta1 = 0.9;
+    const beta2 = 0.999;
+    const eps = 1e-8;
     let velocity = this.optimizerVelocity.get(param);
     if (!velocity) {
       velocity = new Float32Array(param.length);
       this.optimizerVelocity.set(param, velocity);
       this.optimizerVelocityBuffers.push(velocity);
     }
+    let second = this.optimizerSecondMoment.get(param);
+    if (!second) {
+      second = new Float32Array(param.length);
+      this.optimizerSecondMoment.set(param, second);
+      this.optimizerSecondMomentBuffers.push(second);
+    }
 
-    // Momentum SGD: average the sequence gradient first, then keep 90% of the
-    // previous direction. This is materially faster on the tiny, noisy
-    // per-turn gradients produced by browser fine-tuning while retaining a
-    // constant one-buffer memory overhead.
+    const bias1 = 1 - Math.pow(beta1, Math.max(1, this.optimizerStep));
+    const bias2 = 1 - Math.pow(beta2, Math.max(1, this.optimizerStep));
     for (let i = 0; i < param.length; i++) {
       const g = grad[i] * invCount;
-      velocity[i] = beta * velocity[i] + (1 - beta) * g;
-      param[i] -= lr * (velocity[i] + weightDecay * param[i]);
+      velocity[i] = beta1 * velocity[i] + (1 - beta1) * g;
+      second[i] = beta2 * second[i] + (1 - beta2) * g * g;
+      const mHat = velocity[i] / bias1;
+      const vHat = second[i] / bias2;
+      param[i] -= lr * (mHat / (Math.sqrt(vHat) + eps) + weightDecay * param[i]);
     }
   }
 
@@ -1498,6 +1518,7 @@ export class SmallLanguageModel {
     this.ensureGradScratch();
 
     const { dModel, nHeads, nLayers, dFfn, vocabSize, loraRank, loraAlpha } = this.config;
+    this.optimizerStep++;
     const headDim = Math.floor(dModel / nHeads);
     const loraScale = loraRank > 0 ? loraAlpha / loraRank : 1.0;
     const attnScale = 1.0 / Math.sqrt(headDim);
@@ -1675,6 +1696,8 @@ export class SmallLanguageModel {
 
       // One update per block, averaged over the sequence's positions.
       if (loraRank > 0) {
+        // One optimizer step per sequence, shared by all adapter tensors.
+        // Increment only once after every layer's gradients have been applied.
         this.applyAdapterUpdate(layer.lora_q_A, this.dLora_qA, targetCount, learningRate, weightDecay);
         this.applyAdapterUpdate(layer.lora_q_B, this.dLora_qB, targetCount, learningRate, weightDecay);
         this.applyAdapterUpdate(layer.lora_v_A, this.dLora_vA, targetCount, learningRate, weightDecay);
