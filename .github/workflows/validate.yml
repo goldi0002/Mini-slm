@@ -1,1 +1,6 @@
-# Retired: GitHub Pages deployment is the only CI workflow.\n
+name: Retired Validation
+
+on:
+  workflow_dispatch:
+
+jobs: {}
