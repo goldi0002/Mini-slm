@@ -143,8 +143,27 @@ export const ChatPlayground: React.FC<ChatPlaygroundProps> = ({
 
     try {
       await runGeneration(text);
+    } catch (error) {
+      console.error('Local generation failed:', error);
+      // Never leave an empty assistant bubble behind when the runtime fails.
+      setMessages((prev) => prev.map((m) =>
+        m.role === 'assistant' && m.content.trim() === ''
+          ? { ...m, content: 'The local model could not generate a reply. Please try again.' }
+          : m
+      ));
+      setCompareMessages((prev) => ({
+        base: prev.base.map((m) =>
+          m.role === 'assistant' && m.content.trim() === ''
+            ? { ...m, content: 'The local model could not generate a reply. Please try again.' }
+            : m
+        ),
+        finetuned: prev.finetuned.map((m) =>
+          m.role === 'assistant' && m.content.trim() === ''
+            ? { ...m, content: 'The local model could not generate a reply. Please try again.' }
+            : m
+        ),
+      }));
     } finally {
-      // Always release the UI, even if a generation step throws.
       setIsGenerating(false);
     }
   };
@@ -206,10 +225,7 @@ export const ChatPlayground: React.FC<ChatPlaygroundProps> = ({
 
       for await (const tokenInfo of model.generateChatStream(prompt, options, true, grounded.sources.length === 0)) {
         ftTokens.push(tokenInfo);
-        const decoded = model.tokenizer.decode(
-          ftTokens.map((t) => t.id),
-          true
-        );
+        const decoded = ftTokens.map((t) => t.token).join('');
         setCompareMessages((prev) => ({
           ...prev,
           finetuned: prev.finetuned.map((m) =>
@@ -281,10 +297,7 @@ export const ChatPlayground: React.FC<ChatPlaygroundProps> = ({
       const collectedTokens: GeneratedTokenInfo[] = [];
       for await (const tokenInfo of model.generateChatStream(prompt, options, isFinetuned, grounded.sources.length === 0)) {
         collectedTokens.push(tokenInfo);
-        const decoded = model.tokenizer.decode(
-          collectedTokens.map((t) => t.id),
-          true
-        );
+        const decoded = collectedTokens.map((t) => t.token).join('');
 
         setMessages((prev) =>
           prev.map((m) =>
