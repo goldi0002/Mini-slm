@@ -7,7 +7,6 @@
  */
 import { pipeline, TextStreamer } from '@huggingface/transformers';
 import type { GenerationOptions, GeneratedTokenInfo } from '../types';
-import { defaultTokenizer } from './tokenizer';
 
 export const PRETRAINED_MODEL_ID = 'onnx-community/SmolLM2-135M-Instruct-ONNX';
 
