@@ -9,10 +9,11 @@ import { LocalKnowledgeBase, KnowledgeDocument } from '../slm/knowledge';
 
 interface KnowledgeManagerProps {
   knowledgeBase: LocalKnowledgeBase;
+  knowledgeReady: boolean;
   onChanged: () => void;
 }
 
-export const KnowledgeManager: React.FC<KnowledgeManagerProps> = ({ knowledgeBase, onChanged }) => {
+export const KnowledgeManager: React.FC<KnowledgeManagerProps> = ({ knowledgeBase, knowledgeReady, onChanged }) => {
   const [documents, setDocuments] = useState<KnowledgeDocument[]>([]);
   const [name, setName] = useState('');
   const [content, setContent] = useState('');
@@ -25,7 +26,7 @@ export const KnowledgeManager: React.FC<KnowledgeManagerProps> = ({ knowledgeBas
 
   useEffect(() => {
     refresh();
-  }, [knowledgeBase]);
+  }, [knowledgeBase, knowledgeReady]);
 
   const addKnowledge = async () => {
     if (!content.trim() || busy) return;
