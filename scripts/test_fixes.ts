@@ -6,7 +6,7 @@
  */
 
 import { SmallLanguageModel } from '../src/slm/transformer';
-import { defaultTokenizer, UNK_ID, EOS_ID, SPECIAL_TOKENS } from '../src/slm/tokenizer';
+import { defaultTokenizer, UNK_ID, EOS_ID, ASSISTANT_ID, SPECIAL_TOKENS } from '../src/slm/tokenizer';
 import { initializePretrainedModel, PREDEFINED_MODELS } from '../src/slm/predefinedModels';
 import { PREDEFINED_DATASETS } from '../src/slm/datasets';
 import { sampleFromDistribution, softmax } from '../src/slm/matrix';
@@ -443,7 +443,8 @@ async function runTestSuite() {
       const { logits, seqLen } = evalModel.forward(evalTokens, useLora);
       let total = 0;
       let count = 0;
-      for (let i = 0; i < seqLen - 1; i++) {
+      const lossStart = evalTokens.lastIndexOf(ASSISTANT_ID) + 1;
+      for (let i = lossStart; i < seqLen - 1; i++) {
         const target = evalTokens[i + 1];
         if (target === 0) continue;
         const row = logits.subarray(i * V, (i + 1) * V);
@@ -817,7 +818,8 @@ async function runTestSuite() {
     const pre = m.forward(tokens, false);
     let preBlended = 0;
     let counted = 0;
-    for (let i = 0; i < pre.seqLen - 1; i++) {
+    const lossStart = tokens.lastIndexOf(ASSISTANT_ID) + 1;
+    for (let i = lossStart; i < pre.seqLen - 1; i++) {
       const target = tokens[i + 1];
       if (target === 0) continue;
       softmax(pre.logits.subarray(i * V, (i + 1) * V), probs, 1.0);
@@ -877,7 +879,8 @@ async function runTestSuite() {
     const { logits, seqLen } = m.forward(tokens, true);
     let neuralCE = 0;
     let count = 0;
-    for (let i = 0; i < seqLen - 1; i++) {
+    const lossStart = tokens.lastIndexOf(ASSISTANT_ID) + 1;
+    for (let i = lossStart; i < seqLen - 1; i++) {
       const target = tokens[i + 1];
       if (target === 0) continue;
       softmax(logits.subarray(i * V, (i + 1) * V), probs, 1.0);
