@@ -936,6 +936,12 @@ async function runTestSuite() {
     for (let step = 0; step < 40; step++) m.trainStep(diagnosticTokens, 0.03, true, 0.001, false);
     const after = responseLoss(m);
     console.log('  📈 DIAG LoRA response loss: ' + before.toFixed(3) + ' -> ' + after.toFixed(3) + ' after 40 steps (target 0.30)');
+
+    const full = initializePretrainedModel(baseConfig);
+    const fullBefore = responseLoss(full);
+    for (let step = 0; step < 80; step++) full.trainStep(diagnosticTokens, 0.05, false, 0.0, false);
+    const fullAfter = responseLoss(full);
+    console.log('  📈 DIAG Full response loss: ' + fullBefore.toFixed(3) + ' -> ' + fullAfter.toFixed(3) + ' after 80 steps (target 0.30)');
   }
 
   // -------------------------------------------------------------
