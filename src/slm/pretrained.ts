@@ -9,7 +9,7 @@ import { pipeline } from '@huggingface/transformers';
 import type { GenerationOptions, GeneratedTokenInfo } from '../types';
 import { defaultTokenizer } from './tokenizer';
 
-export const PRETRAINED_MODEL_ID = 'HuggingFaceTB/SmolLM2-360M-Instruct';
+export const PRETRAINED_MODEL_ID = 'onnx-community/SmolLM2-360M-Instruct-ONNX';
 
 type Generator = (messages: Array<{ role: string; content: string }>, options?: Record<string, unknown>) => Promise<unknown>;
 
