@@ -1166,6 +1166,7 @@ export class SmallLanguageModel {
     if (!velocity) {
       velocity = new Float32Array(param.length);
       this.optimizerVelocity.set(param, velocity);
+      this.optimizerVelocityBuffers.push(velocity);
     }
     for (let i = 0; i < param.length; i++) {
       const g = grad[i] * invCount * clipScale;
