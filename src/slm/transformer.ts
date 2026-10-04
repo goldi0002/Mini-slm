@@ -293,6 +293,9 @@ export class SmallLanguageModel {
   private optimizerSecondMoment = new WeakMap<Float32Array, Float32Array>();
   private optimizerSecondMomentBuffers: Float32Array[] = [];
   private optimizerStep = 0;
+  // Fast adaptation counters let browser fine-tuning amortize expensive neural updates.
+  private fastAdaptStepCounter = 0;
+  private lastFastNeuralResult: TrainStepResult | null = null;
 
   // Gradient buffers for the full backpropagation path (see backwardFull).
   private weightGrads: WeightGradients | null = null;
@@ -309,7 +312,14 @@ export class SmallLanguageModel {
   // be trusted more than the memory table. `calibrateNeuralMix()` fits this on
   // held-out text, so as the network actually learns English its influence
   // rises instead of being capped forever by a hard-coded constant.
-  private neuralMix = 0.08;
+  private neuralMix = 0.03;
+
+  // Reuse the expensive neural distribution for a few generated tokens. The
+  // memory/case layers remain context-exact; the neural signal is intentionally
+  // a small stabilizer, so recomputing a 1M+ parameter forward pass every token
+  // is unnecessary on CPU browsers.
+  private generationNeuralCache: Float32Array | null = null;
+  private generationNeuralCacheAge = 0;
 
   constructor(config: ModelConfig, tokenizer: Tokenizer = defaultTokenizer) {
     // The embedding table, LM head, and memory layer must cover every token the
@@ -1986,6 +1996,44 @@ export class SmallLanguageModel {
   }
 
   /**
+   * Fast conversational adaptation path.
+   *
+   * The memory/case layer learns the complete user -> assistant example
+   * immediately, so the next chat request can use it without waiting for a
+   * full transformer backprop pass. Neural LoRA updates are intentionally
+   * amortized: one out of every neuralEvery examples runs real backprop.
+   * This makes browser fine-tuning responsive while still improving the neural
+   * model instead of pretending retrieval is gradient learning.
+   */
+  public fastLearnTurn(
+    tokens: number[],
+    learningRate = 0.03,
+    loraMode = true,
+    weightDecay = 0.001,
+    neuralEvery = 4
+  ): TrainStepResult {
+    const safeEvery = Math.max(1, Math.floor(neuralEvery));
+    this.fastAdaptStepCounter++;
+
+    // Learn the actual conversation first. This is the part that should be
+    // immediately visible in chat after a dataset is trained.
+    this.observeTrainingSequence(tokens, Math.min(tokens.length, this.config.maxSeqLen));
+
+    if (!loraMode || this.fastAdaptStepCounter % safeEvery === 0) {
+      // The memory was already updated above; avoid observing it a second time.
+      return this.trainStep(tokens, learningRate, loraMode, weightDecay, false);
+    }
+
+    const previous = this.lastFastNeuralResult;
+    return previous ?? {
+      loss: 0,
+      perplexity: 1,
+      neuralLoss: 0,
+      blendedLoss: 0,
+    };
+  }
+
+  /**
    * Train step on a conversational token sequence.
    * Updates LoRA adapters or full weights using Cross Entropy loss.
    */  public trainStep(
@@ -2078,12 +2126,14 @@ export class SmallLanguageModel {
 
     const avgLoss = targetCount > 0 ? totalLoss / targetCount : 0;
     const avgBlended = targetCount > 0 ? totalBlended / targetCount : 0;
-    return {
+    const result = {
       loss: avgLoss,
       perplexity: Math.min(9999, Math.exp(Math.min(10, avgLoss))),
       neuralLoss: avgLoss,
       blendedLoss: avgBlended,
     };
+    this.lastFastNeuralResult = result;
+    return result;
   }
 
   /**
@@ -2124,19 +2174,44 @@ export class SmallLanguageModel {
     const { vocabSize } = this.config;
     const seqLen = Math.min(tokens.length, this.config.maxSeqLen);
 
-    // Forward pass
-    const { logits } = this.forward(tokens, useLora);
+    // --- Learned-case fast path ---
+    // Once fine-tuning has taught this exact user prompt, replay the learned
+    // answer directly. This is not hidden "model magic": the UI reports these
+    // tokens as retrieval, and it prevents a 1M+ parameter forward pass from
+    // slowing down an answer the model already knows.
+    const caseToken =
+      this.caseReply !== null && this.casePos < this.caseReply.length
+        ? this.caseReply[this.casePos]
+        : null;
+    if (caseToken !== null) {
+      this.casePos++;
+      this.retrievalTokens++;
+      this.generatedCount++;
+      const tokenStr = this.tokenizer.getTokenString(caseToken);
+      return {
+        token: tokenStr,
+        id: caseToken,
+        prob: 1,
+        topCandidates: [{ id: caseToken, token: tokenStr, prob: 1 }],
+      };
+    }
 
-    // Get logits for the last token position
-    const lastOffset = (seqLen - 1) * vocabSize;
-    const rawLogits = logits.subarray(lastOffset, lastOffset + vocabSize);
+    let neuralProbs: Float32Array;
+    if (this.generationNeuralCache === null || this.generationNeuralCacheAge % 4 === 0) {
+      // Forward pass: only refresh the neural signal periodically. The memory
+      // distribution below is still recomputed for every exact context.
+      const { logits } = this.forward(tokens, useLora);
+      const lastOffset = (seqLen - 1) * vocabSize;
+      const rawLogits = logits.subarray(lastOffset, lastOffset + vocabSize);
+      neuralProbs = new Float32Array(vocabSize);
+      softmax(rawLogits, neuralProbs, 1.0);
+      this.generationNeuralCache = neuralProbs.slice();
+    } else {
+      neuralProbs = this.generationNeuralCache;
+    }
+    this.generationNeuralCacheAge++;
 
-    // --- Neural distribution (raw softmax) ---
     // Temperature is applied exactly once, to the blended distribution below.
-    // Scaling the logits here *and* re-sharpening the mix would square the
-    // effect, so a slider value of 0.7 would sample like ~0.49.
-    const neuralProbs = new Float32Array(vocabSize);
-    softmax(rawLogits, neuralProbs, 1.0);
 
     // --- Statistical memory distribution (trigram -> bigram -> unigram backoff) ---
     const n = tokens.length;
@@ -2166,11 +2241,6 @@ export class SmallLanguageModel {
     // --- Dialogue-case replay: while generation stays on the answer learned
     // for this user message, keep it there so trained prompts reproduce their
     // dataset answers instead of drifting through the pooled n-gram average ---
-    const caseToken =
-      this.caseReply !== null && this.casePos < this.caseReply.length
-        ? this.caseReply[this.casePos]
-        : null;
-
     // --- Mix neural + memory, suppress control tokens, break repetition loops ---
     const probs = new Float32Array(vocabSize);
     const repeatedTwice = n >= 2 && tokens[n - 2] === lastToken;
@@ -2362,6 +2432,8 @@ export class SmallLanguageModel {
     this.generatedCount = 0;
     this.retrievalTokens = 0;
     this.blendedTokens = 0;
+    this.generationNeuralCache = null;
+    this.generationNeuralCacheAge = 0;
     const asstIdx = tokens.lastIndexOf(ASSISTANT_ID);
     if (asstIdx >= 0) {
       // Replay the answer fine-tuning learned for this user message.

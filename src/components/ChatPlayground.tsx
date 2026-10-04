@@ -91,13 +91,13 @@ export const ChatPlayground: React.FC<ChatPlaygroundProps> = ({
 
   // Generation Hyperparameters
   const [options, setOptions] = useState<GenerationOptions>({
-    temperature: 0.7,
-    topK: 25,
-    topP: 0.85,
-    repetitionPenalty: 1.15,
-    // Room for a reply to reach a sentence it can stop on. At ~26 tokens the
-    // model regularly ran out of budget mid-clause and answers looked cut off.
-    maxNewTokens: 40,
+    // Conservative defaults keep the small local model on-topic. Users can
+    // increase temperature from Sampling when they want more variety.
+    temperature: 0.2,
+    topK: 8,
+    topP: 0.9,
+    repetitionPenalty: 1.12,
+    maxNewTokens: 48,
   });
 
   const chatEndRef = useRef<HTMLDivElement>(null);

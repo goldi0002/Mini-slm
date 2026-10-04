@@ -7,7 +7,6 @@ import { ModelConfig } from '../types';
 import { defaultTokenizer, SPECIAL_TOKENS } from './tokenizer';
 import { SmallLanguageModel } from './transformer';
 import { PREDEFINED_DATASETS, generateExpandedChatCorpus } from './datasets';
-import { ENGLISH_LEARNING_CORPUS } from './corpus';
 
 /**
  * Baseline dialogue the base model is pre-trained on.
@@ -61,19 +60,19 @@ ensureVocabulary();
 
 export const PREDEFINED_MODELS: ModelConfig[] = [
   {
-    id: 'assistant-48',
-    name: 'Assistant-48 (Balanced Chat)',
-    tagline: '2 Layers • 48-dim • 4 Heads • ~1.8 MB RAM • Fluent Daily Dialogue',
+    id: 'minislm-1m',
+    name: 'MiniSLM 1.4M (Fast Adapt)',
+    tagline: '4 Layers • 192-dim • 6 Heads • 384 FFN • ~1.4M params • Fast LoRA + memory learning',
     vocabSize: defaultTokenizer.vocabSize,
-    dModel: 48,
-    nHeads: 4,
-    nLayers: 2,
-    dFfn: 96,
+    dModel: 192,
+    nHeads: 6,
+    nLayers: 4,
+    dFfn: 384,
     // Context holds the reply as well as the prompt: a ~40 token answer plus
     // the recent turns needs more than the 64 this started with.
-    maxSeqLen: 96,
-    loraRank: 4,
-    loraAlpha: 8,
+    maxSeqLen: 128,
+    loraRank: 16,
+    loraAlpha: 32,
   },
   {
     id: 'nanolm-light',
@@ -104,39 +103,18 @@ export const PREDEFINED_MODELS: ModelConfig[] = [
 ];
 
 /**
- * Pre-seeds baseline conversational knowledge into the model so it behaves
- * like a pre-trained Conversational Small Language Model before user
- * fine-tuning is applied.
+ * Pre-seeds baseline conversational knowledge.
  *
- * Two layers of pre-training:
+ * The default 1.4M-parameter model deliberately does not run a full neural
+ * pretraining pass on page load. That would make the browser wait on thousands
+ * of matrix operations before the first chat. Instead the statistical memory
+ * layer is seeded immediately, and the Fine-Tuning Studio performs real LoRA
+ * backpropagation only when the user asks it to learn.
  *
- * 1. The statistical memory layer learns fluent conversational English from
- *    a dialogue corpus (this is what makes the base model chat coherently).
- *
- * 2. The neural weights get a short warm-up of real gradient descent, so the
- *    forward pass is context-sensitive from the first message and can keep
- *    learning when the Fine-Tuning Studio revisits it later. The warm-up
- *    passes over both the plain-English corpus (grammar / next-word) and the
- *    dialogue corpus (chat format), with memory observation turned off for the
- *    English pass so the dialogue memory stays conversational and on for the
- *    dialogue pass so the model can already answer its warm-up prompts.
- *
- *    A newly built model currently takes a couple of seconds in the browser
- *    for this warm-up. Rewriting it to run `predict` (inference, already fast)
- *    instead of `trainStep` (backprop, which the warm-up currently uses) until
- *    the forward pass has crossed some loss threshold is left as the next
- *    performance optimisation, once a working forward pass exists.
+ * This separation is important: memory/case replay gives immediate adaptation
+ * for a dataset, while the transformer remains a genuine 1M+ parameter neural
+ * model that can continue learning through LoRA.
  */
-const WARMUP_EPOCHS = 2;
-
-/**
- * Measured, not guessed: one pass at this rate lowers held-out cross-entropy
- * from ~7.0 nats (uniform) to ~4.8 nats, while a pass at 0.02 only reaches
- * ~6.6. Gradients are globally clipped (see GRADIENT_CLIP_NORM), which is what
- * makes the higher rate stable instead of divergent.
- */
-const WARMUP_LR = 0.1;
-
 export function initializePretrainedModel(config: ModelConfig): SmallLanguageModel {
   ensureVocabulary();
   const modelConfig = { ...config, vocabSize: defaultTokenizer.vocabSize };
@@ -145,17 +123,11 @@ export function initializePretrainedModel(config: ModelConfig): SmallLanguageMod
   const conversationalCorpus = PRETRAIN_CORPUS;
   model.learnCorpus(conversationalCorpus, 1);
 
-  const englishPass = ENGLISH_LEARNING_CORPUS.map((text) =>
-    defaultTokenizer.encode(text, true, true)
-  );
-  for (let epoch = 0; epoch < WARMUP_EPOCHS; epoch++) {
-    const lr = WARMUP_LR * (1 - epoch / (WARMUP_EPOCHS + 1));
-    for (let i = epoch; i < englishPass.length; i += WARMUP_EPOCHS) {
-      model.trainStep(englishPass[i], lr, false, 0.001, false);
-    }
-  }
+  // Skip full neural warm-up for the 1M+ browser model. The memory layer
+  // provides the deterministic conversational prior immediately; LoRA training
+  // in the Studio performs the expensive neural adaptation only when requested.
 
-  // Save the warm-up state (weights + memory) as the official Base Snapshot
+  // Save the initialized state (weights + memory) as the official Base Snapshot
   model.saveBaseSnapshot();
 
   return model;
