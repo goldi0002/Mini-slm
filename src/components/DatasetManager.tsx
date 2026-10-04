@@ -173,13 +173,13 @@ export const DatasetManager: React.FC<DatasetManagerProps> = ({
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4 space-y-4">
       {/* Header Banner */}
-      <div className="bg-white border border-slate-200 rounded-xl p-4 shadow-2xs flex flex-wrap items-center justify-between gap-4">
+      <div className="bg-white border border-slate-200 rounded-xl p-4 shadow-2xs flex flex-col sm:flex-row sm:flex-wrap sm:items-center sm:justify-between gap-3 min-w-0">
         <div>
-          <div className="flex items-center gap-2">
-            <span className="p-1.5 bg-emerald-50 text-emerald-600 rounded-lg border border-emerald-200">
+          <div className="flex items-start sm:items-center gap-2 min-w-0">
+            <span className="p-1.5 shrink-0 bg-emerald-50 text-emerald-600 rounded-lg border border-emerald-200">
               <Database className="w-5 h-5" />
             </span>
-            <h2 className="text-base font-bold text-slate-900">
+            <h2 className="text-sm sm:text-base font-bold text-slate-900 break-words">
               Conversational Chat Datasets
             </h2>
             <span className="text-[11px] bg-emerald-50 text-emerald-700 px-2 py-0.5 rounded-md border border-emerald-200 font-medium flex items-center gap-1">
@@ -192,10 +192,10 @@ export const DatasetManager: React.FC<DatasetManagerProps> = ({
           </p>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="w-full sm:w-auto">
           <button
-            onClick={onNavigateToTrain}
-            className="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-lg text-xs font-semibold shadow-2xs transition-colors cursor-pointer"
+            onClick={onNavigateToTrain
+            className="w-full sm:w-auto bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-lg text-xs font-semibold shadow-2xs transition-colors cursor-pointer"
           >
             Train on This Dataset
           </button>
@@ -272,7 +272,7 @@ export const DatasetManager: React.FC<DatasetManagerProps> = ({
               <span>Add Conversation Turn</span>
             </h3>
 
-            <form onSubmit={handleAddTurn} className="space-y-3 text-xs">
+            <form onSubmit={handleAddTurn} className="space-y-3 text-xs min-w-0">
               <div>
                 <label className="block text-slate-600 font-medium mb-1">User Message</label>
                 <input
@@ -295,18 +295,18 @@ export const DatasetManager: React.FC<DatasetManagerProps> = ({
                 />
               </div>
 
-              <div className="flex gap-2">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                 <input
                   type="text"
                   value={newCategory}
                   onChange={(e) => setNewCategory(e.target.value)}
                   placeholder="Category (e.g. Advice)"
-                  className="w-1/2 bg-slate-50 border border-slate-200 rounded-lg p-2 text-slate-900 focus:outline-hidden focus:ring-1 focus:ring-indigo-500"
+                  className="w-full bg-slate-50 border border-slate-200 rounded-lg p-2 text-slate-900 focus:outline-hidden focus:ring-1 focus:ring-indigo-500"
                 />
                 <button
                   type="submit"
                   disabled={!newUserMsg.trim() || !newAssistantMsg.trim()}
-                  className="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg font-semibold transition-colors disabled:opacity-50 cursor-pointer"
+                  className="w-full bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg font-semibold transition-colors disabled:opacity-50 cursor-pointer"
                 >
                   Add Pair
                 </button>
@@ -318,7 +318,7 @@ export const DatasetManager: React.FC<DatasetManagerProps> = ({
         {/* Right Columns: Active Turns List */}
         <div className="lg:col-span-2 space-y-3">
           <div className="bg-white border border-slate-200 rounded-xl p-4 shadow-2xs">
-            <div className="flex items-center justify-between mb-4 pb-2 border-b border-slate-100">
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-4 pb-2 border-b border-slate-100 min-w-0">
               <div>
                 <h3 className="text-sm font-bold text-slate-900">
                   {currentDataset.name}
@@ -326,7 +326,7 @@ export const DatasetManager: React.FC<DatasetManagerProps> = ({
                 <p className="text-xs text-slate-500">{currentDataset.description}</p>
               </div>
               
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 <button
                   onClick={handleExportJSON}
                   title="Export dialogue pairs to JSON"
@@ -406,7 +406,7 @@ export const DatasetManager: React.FC<DatasetManagerProps> = ({
                       <div className="w-5 h-5 rounded bg-slate-800 text-white flex items-center justify-center shrink-0 mt-0.5">
                         <User className="w-3 h-3" />
                       </div>
-                      <div className="flex-1 text-slate-800 font-medium">
+                      <div className="flex-1 min-w-0 break-words text-slate-800 font-medium">
                         {turn.user}
                       </div>
                     </div>
@@ -416,7 +416,7 @@ export const DatasetManager: React.FC<DatasetManagerProps> = ({
                       <div className="w-5 h-5 rounded bg-indigo-600 text-white flex items-center justify-center shrink-0 mt-0.5">
                         <Bot className="w-3 h-3" />
                       </div>
-                      <div className="flex-1 text-indigo-950 font-normal leading-relaxed">
+                      <div className="flex-1 min-w-0 break-words text-indigo-950 font-normal leading-relaxed">
                         {turn.assistant}
                       </div>
                     </div>
