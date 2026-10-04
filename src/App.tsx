@@ -122,6 +122,7 @@ export default function App() {
           {activeTab === 'knowledge' && (
             <KnowledgeManager
               knowledgeBase={knowledgeBase}
+              knowledgeReady={knowledgeReady}
               onChanged={() => setKnowledgeVersion((v) => v + 1)}
             />
           )}
