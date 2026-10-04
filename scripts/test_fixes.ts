@@ -908,6 +908,37 @@ async function runTestSuite() {
   }
 
   // -------------------------------------------------------------
+  // DIAGNOSTIC: target-loss trajectory for response-only LoRA
+  // -------------------------------------------------------------
+  {
+    const m = initializePretrainedModel(baseConfig);
+    const diagnosticText =
+      SPECIAL_TOKENS.USER + ' explain a simple morning routine ' + SPECIAL_TOKENS.NEWLINE +
+      SPECIAL_TOKENS.ASSISTANT + ' drink water take a short walk and plan one important task .';
+    const diagnosticTokens = m.tokenizer.encode(diagnosticText, true, true);
+    const responseLoss = (model: SmallLanguageModel): number => {
+      const { logits, seqLen } = model.forward(diagnosticTokens, true);
+      const V = model.config.vocabSize;
+      const start = diagnosticTokens.lastIndexOf(ASSISTANT_ID) + 1;
+      const p = new Float32Array(V);
+      let total = 0;
+      let count = 0;
+      for (let i = start; i < seqLen - 1; i++) {
+        const target = diagnosticTokens[i + 1];
+        if (target === 0) continue;
+        softmax(logits.subarray(i * V, (i + 1) * V), p, 1.0);
+        total += -Math.log(Math.max(1e-8, p[target]));
+        count++;
+      }
+      return total / Math.max(1, count);
+    };
+    const before = responseLoss(m);
+    for (let step = 0; step < 40; step++) m.trainStep(diagnosticTokens, 0.03, true, 0.001, false);
+    const after = responseLoss(m);
+    console.log('  📈 DIAG LoRA response loss: ' + before.toFixed(3) + ' -> ' + after.toFixed(3) + ' after 40 steps (target 0.30)');
+  }
+
+  // -------------------------------------------------------------
   // Test ISS-20: retrieval is reported, and the studio scores held-out turns
   // -------------------------------------------------------------
   console.log('\n--- ISS-20: Retrieval Is Reported, Held-Out Evaluation Exists ---');
