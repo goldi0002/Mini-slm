@@ -4,15 +4,15 @@
  */
 
 import React from 'react';
-import { 
-  Bot, 
-  Cpu, 
-  Flame, 
-  Layers, 
-  Database, 
+import {
+  Bot,
+  Database,
+  HardDrive,
+  Layers3,
   RotateCcw,
   Sparkles,
-  HardDrive
+  Flame,
+  Cpu,
 } from 'lucide-react';
 import { ModelConfig } from '../types';
 import { defaultTokenizer } from '../slm/tokenizer';
@@ -29,6 +29,13 @@ interface HeaderProps {
   memoryFormatted?: string;
 }
 
+const navItems = [
+  { id: 'chat' as const, label: 'Chat', icon: Bot },
+  { id: 'train' as const, label: 'Fine-tune', icon: Flame },
+  { id: 'datasets' as const, label: 'Datasets', icon: Database },
+  { id: 'inspect' as const, label: 'Inspect', icon: Layers3 },
+];
+
 export const Header: React.FC<HeaderProps> = ({
   models,
   currentModel,
@@ -39,154 +46,114 @@ export const Header: React.FC<HeaderProps> = ({
   onResetToBase,
   paramStats,
   memoryFormatted = '1.8 MB',
-}) => {
-  return (
-    <header className="bg-white border-b border-slate-200 sticky top-0 z-30 shadow-xs">
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 py-2 sm:py-0 sm:h-16 min-w-0">
-          
-          {/* Logo and Identity */}
-          <div className="flex items-start sm:items-center gap-2 sm:gap-3 min-w-0 flex-1">
-            <div className="w-9 h-9 sm:w-10 sm:h-10 shrink-0 rounded-xl bg-indigo-600 text-white flex items-center justify-center shadow-sm">
-              <Bot className="w-5 h-5" />
-            </div>
-            <div>
-              <div className="flex flex-wrap items-center gap-1.5 sm:gap-2 min-w-0">
-                <h1 className="text-sm sm:text-base font-bold text-slate-900 leading-tight break-words">
-                  Conversational SLM
-                </h1>
-                <span className="px-2 py-0.5 text-[11px] font-semibold bg-emerald-50 text-emerald-700 rounded-full border border-emerald-200 flex items-center gap-1">
-                  <HardDrive className="w-3 h-3" />
-                  {memoryFormatted} RAM
-                </span>
-                {isFinetuned ? (
-                  <span className="px-2 py-0.5 text-[11px] font-semibold bg-indigo-50 text-indigo-700 rounded-full border border-indigo-200 flex items-center gap-1">
-                    <Sparkles className="w-3 h-3" /> Fine-Tuned
-                  </span>
-                ) : (
-                  <span className="px-2 py-0.5 text-[11px] font-medium bg-slate-100 text-slate-600 rounded-full">
-                    Base Model
-                  </span>
-                )}
-              </div>
-              <p className="text-xs text-slate-500 mt-0.5 hidden sm:block">
-                Ultra-lightweight conversational AI assistant running 100% locally in browser memory
-              </p>
-            </div>
+}) => (
+  <header className="sticky top-0 z-30 border-b border-slate-200/80 bg-white/90 backdrop-blur-xl">
+    <div className="mx-auto w-full max-w-[1180px] px-4 sm:px-6 lg:px-8">
+      <div className="flex min-h-[68px] items-center justify-between gap-4 py-3">
+        <div className="flex min-w-0 items-center gap-3">
+          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-[13px] bg-slate-950 text-white shadow-sm">
+            <Bot className="h-5 w-5" strokeWidth={2.1} />
           </div>
 
-          {/* Model Selector and Reset */}
-          <div className="grid grid-cols-2 sm:flex sm:flex-wrap items-stretch sm:items-center justify-end gap-2 w-full sm:w-auto">
-            <div className="relative max-w-full">
-              <select
-                id="model-selector"
-                value={currentModel.id}
-                onChange={(e) => {
-                  const m = models.find((mod) => mod.id === e.target.value);
-                  if (m) onSelectModel(m);
-                }}
-                aria-label="Select Small Language Model"
-                className="w-full sm:w-auto max-w-full min-w-0 text-xs font-medium bg-slate-50 hover:bg-slate-100 border border-slate-200 text-slate-800 rounded-lg px-3 py-1.5 focus:outline-hidden focus:ring-2 focus:ring-indigo-500 cursor-pointer pr-8"
-              >
-                {models.map((mod) => (
-                  <option key={mod.id} value={mod.id}>
-                    {mod.name}
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            <div className="hidden lg:flex items-center gap-2 text-xs bg-slate-50 border border-slate-200 rounded-lg px-2.5 py-1 text-slate-600">
-              <span className="text-slate-400">Params:</span>
-              <span className="font-mono font-semibold text-slate-800">
-                {paramStats.total.toLocaleString()}
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-2">
+              <h1 className="truncate text-[15px] font-semibold tracking-[-0.01em] text-slate-950 sm:text-base">
+                Mini SLM Studio
+              </h1>
+              <span className="hidden items-center gap-1 rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[10px] font-semibold text-emerald-700 sm:flex">
+                <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+                Local
+              </span>
+              <span className={'flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-semibold ' + (
+                isFinetuned
+                  ? 'border-indigo-200 bg-indigo-50 text-indigo-700'
+                  : 'border-slate-200 bg-slate-50 text-slate-600'
+              )}>
+                {isFinetuned ? <Sparkles className="h-3 w-3" /> : <Cpu className="h-3 w-3" />}
+                {isFinetuned ? 'Fine-tuned' : 'Base model'}
               </span>
             </div>
-
-            <div
-              className="hidden xl:flex items-center gap-2 text-xs bg-slate-50 border border-slate-200 rounded-lg px-2.5 py-1 text-slate-600"
-              title={`Hybrid word + BPE subword vocabulary: ${defaultTokenizer.vocabSize.toLocaleString()} tokens, ${defaultTokenizer.bpeMergeCount} learned merges. Unseen words compose from subword pieces instead of being spelled out.`}
-            >
-              <span className="text-slate-400">Vocab:</span>
-              <span className="font-mono font-semibold text-slate-800">
-                {defaultTokenizer.vocabSize.toLocaleString()}
-              </span>
-              <span className="text-slate-300">|</span>
-              <span className="text-slate-400">BPE:</span>
-              <span className="font-mono font-semibold text-slate-800">
-                {defaultTokenizer.bpeMergeCount}
-              </span>
-            </div>
-
-            {isFinetuned && (
-              <button
-                onClick={onResetToBase}
-                id="reset-base-btn"
-                title="Revert model weights back to base pretrained state"
-                className="w-full sm:w-auto justify-center text-xs font-medium text-slate-600 hover:text-rose-600 px-2.5 py-1.5 rounded-lg border border-slate-200 hover:border-rose-200 bg-white hover:bg-rose-50 transition-colors flex items-center gap-1.5 cursor-pointer"
-              >
-                <RotateCcw className="w-3.5 h-3.5" />
-                <span className="hidden sm:inline">Reset Weights</span>
-              </button>
-            )}
+            <p className="mt-0.5 hidden truncate text-xs text-slate-500 md:block">
+              Train, inspect, and chat with a tiny language model in your browser.
+            </p>
           </div>
         </div>
 
-        {/* Navigation Tabs */}
-        <div className="flex items-center gap-1 border-t border-slate-100 pt-1 pb-2 overflow-x-auto min-w-0 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
-          <button
-            onClick={() => setActiveTab('chat')}
-            id="nav-chat-tab"
-            className={`shrink-0 px-3 py-1.5 text-[11px] sm:text-xs font-medium rounded-lg transition-all flex items-center gap-1.5 sm:gap-2 cursor-pointer ${
-              activeTab === 'chat'
-                ? 'bg-indigo-50 text-indigo-700 font-semibold shadow-2xs'
-                : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
-            }`}
-          >
-            <Bot className="w-4 h-4" />
-            <span>Chat with Assistant</span>
-          </button>
+        <div className="flex shrink-0 items-center gap-2">
+          <div className="hidden items-center gap-1.5 rounded-xl border border-slate-200 bg-slate-50 px-2.5 py-2 text-[11px] text-slate-600 lg:flex">
+            <HardDrive className="h-3.5 w-3.5 text-slate-400" />
+            <span className="font-medium text-slate-700">{memoryFormatted}</span>
+            <span className="text-slate-400">RAM</span>
+          </div>
 
-          <button
-            onClick={() => setActiveTab('train')}
-            id="nav-train-tab"
-            className={`shrink-0 px-3 py-1.5 text-[11px] sm:text-xs font-medium rounded-lg transition-all flex items-center gap-1.5 sm:gap-2 cursor-pointer ${
-              activeTab === 'train'
-                ? 'bg-indigo-50 text-indigo-700 font-semibold shadow-2xs'
-                : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
-            }`}
+          <label className="sr-only" htmlFor="model-selector">Select model</label>
+          <select
+            id="model-selector"
+            value={currentModel.id}
+            onChange={(e) => {
+              const model = models.find((item) => item.id === e.target.value);
+              if (model) onSelectModel(model);
+            }}
+            aria-label="Select Small Language Model"
+            className="max-w-[170px] rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-800 shadow-sm transition hover:border-slate-300 hover:bg-slate-50 focus:outline-none"
           >
-            <Flame className="w-4 h-4 text-amber-500" />
-            <span>Train & Fine-Tune (Big Datasets)</span>
-          </button>
+            {models.map((model) => (
+              <option key={model.id} value={model.id}>{model.name}</option>
+            ))}
+          </select>
 
-          <button
-            onClick={() => setActiveTab('datasets')}
-            id="nav-datasets-tab"
-            className={`shrink-0 px-3 py-1.5 text-[11px] sm:text-xs font-medium rounded-lg transition-all flex items-center gap-1.5 sm:gap-2 cursor-pointer ${
-              activeTab === 'datasets'
-                ? 'bg-indigo-50 text-indigo-700 font-semibold shadow-2xs'
-                : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
-            }`}
-          >
-            <Database className="w-4 h-4 text-emerald-500" />
-            <span>User & Assistant Datasets</span>
-          </button>
-
-          <button
-            onClick={() => setActiveTab('inspect')}
-            id="nav-inspect-tab"
-            className={`shrink-0 px-3 py-1.5 text-[11px] sm:text-xs font-medium rounded-lg transition-all flex items-center gap-1.5 sm:gap-2 cursor-pointer ${
-              activeTab === 'inspect'
-                ? 'bg-indigo-50 text-indigo-700 font-semibold shadow-2xs'
-                : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
-            }`}
-          >
-            <Layers className="w-4 h-4 text-sky-500" />
-            <span>Architecture & Memory</span>
-          </button>
+          {isFinetuned && (
+            <button
+              onClick={onResetToBase}
+              id="reset-base-btn"
+              title="Revert model weights back to base pretrained state"
+              className="hidden h-9 items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-600 transition hover:border-rose-200 hover:bg-rose-50 hover:text-rose-600 sm:flex"
+            >
+              <RotateCcw className="h-3.5 w-3.5" />
+              Reset
+            </button>
+          )}
         </div>
       </div>
-    </header>
-  );
-};
+
+      <div className="flex items-center gap-1 overflow-x-auto border-t border-slate-100 py-2 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+        {navItems.map(({ id, label, icon: Icon }) => {
+          const active = activeTab === id;
+          return (
+            <button
+              key={id}
+              onClick={() => setActiveTab(id)}
+              id={'nav-' + id + '-tab'}
+              aria-current={active ? 'page' : undefined}
+              className={'group flex min-h-9 shrink-0 items-center gap-2 rounded-xl px-3 text-xs font-semibold transition ' + (
+                active
+                  ? 'bg-slate-950 text-white shadow-sm'
+                  : 'text-slate-500 hover:bg-slate-100 hover:text-slate-900'
+              )}
+            >
+              <Icon className={'h-3.5 w-3.5 ' + (
+                active
+                  ? 'text-white'
+                  : id === 'train'
+                    ? 'text-amber-500'
+                    : id === 'datasets'
+                      ? 'text-emerald-500'
+                      : id === 'inspect'
+                        ? 'text-sky-500'
+                        : 'text-indigo-500'
+              )} />
+              {label}
+            </button>
+          );
+        })}
+
+        <div className="ml-auto hidden items-center gap-3 pl-4 text-[10px] text-slate-400 lg:flex">
+          <span><strong className="font-semibold text-slate-600">{paramStats.total.toLocaleString()}</strong> params</span>
+          <span className="h-3 w-px bg-slate-200" />
+          <span><strong className="font-semibold text-slate-600">{defaultTokenizer.vocabSize.toLocaleString()}</strong> vocab</span>
+          <span className="h-3 w-px bg-slate-200" />
+          <span><strong className="font-semibold text-slate-600">{defaultTokenizer.bpeMergeCount}</strong> BPE merges</span>
+        </div>
+      </div>
+    </div>
+  </header>
