@@ -1506,7 +1506,11 @@ export class SmallLanguageModel {
     // 1. Cross-entropy gradient: dL/dlogits = softmax - onehot, so
     //    dL/dz = lm_head^T dL/dlogits at every position.
     this.gNorm.fill(0);
-    for (let i = 0; i < seqLen - 1; i++) {
+    // The optimizer objective is assistant-response loss only for dialogue
+    // fine-tuning. Keep the backward pass on exactly the same mask as trainStep
+    // so LoRA cannot spend its capacity learning the user's prompt/control
+    // tokens (and so the 0.30 target is a real response-loss target).
+    for (let i = lossStartIndex; i < seqLen - 1; i++) {
       let targetToken = tokens[i + 1];
       if (targetToken < 0 || targetToken >= vocabSize || !Number.isFinite(targetToken)) {
         targetToken = UNK_ID;
