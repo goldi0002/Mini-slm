@@ -320,10 +320,29 @@ export const ChatPlayground: React.FC<ChatPlaygroundProps> = ({
     'thank you so much for chatting with me !',
   ];
 
+  const isWelcomeState = messages.length === 1 && messages[0].role === 'assistant';
+
   return (
     <section className="chat-page" aria-label="Chat playground">
       <div className="chat-toolbar">
-        <div className="chat-toolbar__left">
+        <div className="chat-toolbar__context">
+          <div className="chat-toolbar__model">
+            <span className="chat-toolbar__model-dot" />
+            <div className="min-w-0">
+              <strong>{comparisonMode ? 'Model comparison' : 'Conversation'}</strong>
+              <span>{comparisonMode ? 'Base vs fine-tuned' : (isFinetuned ? 'Fine-tuned model' : 'Base model')}</span>
+            </div>
+          </div>
+
+          {isFinetuned && !comparisonMode && (
+            <span className="chat-toolbar__status">
+              <Sparkles className="h-3.5 w-3.5" />
+              {activeDatasetName ? activeDatasetName : 'Fine-tuned'}
+            </span>
+          )}
+        </div>
+
+        <div className="chat-toolbar__actions">
           <button
             onClick={() => setComparisonMode(!comparisonMode)}
             id="toggle-comparison-btn"
@@ -331,18 +350,9 @@ export const ChatPlayground: React.FC<ChatPlaygroundProps> = ({
             className={'chat-toolbar__button ' + (comparisonMode ? 'chat-toolbar__button--active' : '')}
           >
             <Columns className="h-3.5 w-3.5" />
-            <span>{comparisonMode ? 'Comparison active' : 'Compare models'}</span>
+            <span>Compare</span>
           </button>
 
-          {isFinetuned && (
-            <div className="chat-toolbar__status">
-              <Sparkles className="h-3.5 w-3.5 text-emerald-600" />
-              <span>{activeDatasetName ? 'Tuned on ' + activeDatasetName : 'Fine-tuned model active'}</span>
-            </div>
-          )}
-        </div>
-
-        <div className="chat-toolbar__right">
           <button
             onClick={() => setShowSettings(!showSettings)}
             id="toggle-settings-btn"
@@ -353,12 +363,13 @@ export const ChatPlayground: React.FC<ChatPlaygroundProps> = ({
             <span>Sampling</span>
             {showSettings ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
           </button>
+
           <button
             onClick={clearChat}
             id="clear-chat-btn"
             title="Clear current dialogue history"
             aria-label="Clear chat"
-            className="chat-toolbar__button !px-2"
+            className="chat-toolbar__icon-button"
           >
             <Trash2 className="h-3.5 w-3.5" />
           </button>
@@ -366,38 +377,52 @@ export const ChatPlayground: React.FC<ChatPlaygroundProps> = ({
       </div>
 
       {showSettings && (
-        <div className="sampling-panel grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-5">
-          {[
-            ['Temperature', options.temperature, '0.1', '1.5', '0.05', (v: number) => v.toFixed(2), 'Controls randomness'],
-            ['Top-K', options.topK, '1', '50', '1', (v: number) => String(v), 'Limits candidate logits'],
-            ['Top-P', options.topP, '0.1', '1.0', '0.05', (v: number) => v.toFixed(2), 'Probability cutoff'],
-            ['Repetition penalty', options.repetitionPenalty, '1.0', '2.0', '0.05', (v: number) => v.toFixed(2), 'Reduces repetition'],
-            ['Max tokens', options.maxNewTokens, '10', '48', '2', (v: number) => String(v), 'Reply length'],
-          ].map(([label, value, min, max, step, format, help], index) => (
-            <label key={String(label)} className="block text-xs">
-              <span className="mb-1 flex items-center justify-between font-semibold text-slate-700">
-                <span>{String(label)}</span>
-                <span className="font-mono text-indigo-600">{(format as (v:number)=>string)(Number(value))}</span>
-              </span>
-              <input
-                type="range"
-                min={String(min)}
-                max={String(max)}
-                step={String(step)}
-                value={Number(value)}
-                onChange={(e) => {
-                  const next = Number(e.target.value);
-                  if (index === 0) setOptions({ ...options, temperature: next });
-                  if (index === 1) setOptions({ ...options, topK: next });
-                  if (index === 2) setOptions({ ...options, topP: next });
-                  if (index === 3) setOptions({ ...options, repetitionPenalty: next });
-                  if (index === 4) setOptions({ ...options, maxNewTokens: next });
-                }}
-                className="w-full accent-indigo-600"
-              />
-              <span className="mt-0.5 block text-[10px] text-slate-400">{String(help)}</span>
-            </label>
-          ))}
+        <div className="sampling-panel">
+          <div className="sampling-panel__header">
+            <div>
+              <strong>Generation settings</strong>
+              <span>Adjust how the local model samples its next token.</span>
+            </div>
+            <button
+              onClick={() => setShowSettings(false)}
+              className="sampling-panel__close"
+              aria-label="Close sampling settings"
+            >
+              <ChevronUp className="h-4 w-4" />
+            </button>
+          </div>
+          <div className="sampling-panel__grid">
+            {[
+              ['Temperature', options.temperature, '0.1', '1.5', '0.05', (v: number) => v.toFixed(2), 'Randomness'],
+              ['Top-K', options.topK, '1', '50', '1', (v: number) => String(v), 'Candidate limit'],
+              ['Top-P', options.topP, '0.1', '1.0', '0.05', (v: number) => v.toFixed(2), 'Probability cutoff'],
+              ['Repetition penalty', options.repetitionPenalty, '1.0', '2.0', '0.05', (v: number) => v.toFixed(2), 'Repeat control'],
+              ['Max tokens', options.maxNewTokens, '10', '48', '2', (v: number) => String(v), 'Reply length'],
+            ].map(([label, value, min, max, step, format, help], index) => (
+              <label key={String(label)} className="sampling-control">
+                <span className="sampling-control__label">
+                  <strong>{String(label)}</strong>
+                  <b>{(format as (v:number)=>string)(Number(value))}</b>
+                </span>
+                <input
+                  type="range"
+                  min={String(min)}
+                  max={String(max)}
+                  step={String(step)}
+                  value={Number(value)}
+                  onChange={(e) => {
+                    const next = Number(e.target.value);
+                    if (index === 0) setOptions({ ...options, temperature: next });
+                    if (index === 1) setOptions({ ...options, topK: next });
+                    if (index === 2) setOptions({ ...options, topP: next });
+                    if (index === 3) setOptions({ ...options, repetitionPenalty: next });
+                    if (index === 4) setOptions({ ...options, maxNewTokens: next });
+                  }}
+                />
+                <small>{String(help)}</small>
+              </label>
+            ))}
+          </div>
         </div>
       )}
 
@@ -406,26 +431,22 @@ export const ChatPlayground: React.FC<ChatPlaygroundProps> = ({
           <div className="chat-scroll">
             <div className="compare-grid">
               <div className="compare-panel">
-                <div className="mb-3 flex items-center justify-between border-b border-slate-200 pb-2">
-                  <div className="flex items-center gap-2">
-                    <span className="h-2 w-2 rounded-full bg-slate-400" />
-                    <span className="text-xs font-bold text-slate-700">Base model</span>
+                <div className="compare-panel__header">
+                  <div>
+                    <span className="compare-panel__eyebrow">BASE</span>
+                    <strong>Pretrained model</strong>
                   </div>
-                  <span className="font-mono text-[10px] text-slate-400">Pretrained</span>
+                  <span className="compare-panel__dot compare-panel__dot--base" />
                 </div>
-                <div className="compare-panel__body space-y-3">
+                <div className="compare-panel__body">
                   {compareMessages.base.map((msg) => (
-                    <div key={msg.id} className={'flex gap-2 text-xs ' + (msg.role === 'user' ? 'justify-end' : '')}>
+                    <div key={msg.id} className={'compare-message ' + (msg.role === 'user' ? 'compare-message--user' : '')}>
                       {msg.role === 'assistant' && (
-                        <div className="chat-avatar chat-avatar--assistant h-6 w-6 flex-basis-[24px]">
+                        <div className="chat-avatar chat-avatar--assistant chat-avatar--small">
                           <Bot className="h-3.5 w-3.5" />
                         </div>
                       )}
-                      <div className={'max-w-[88%] rounded-xl px-3 py-2 leading-relaxed ' + (
-                        msg.role === 'user'
-                          ? 'bg-indigo-600 text-white'
-                          : 'border border-slate-200 bg-white text-slate-800'
-                      )}>
+                      <div className={'compare-bubble ' + (msg.role === 'user' ? 'compare-bubble--user' : '')}>
                         {msg.content || (isGenerating ? 'Thinking…' : '')}
                       </div>
                     </div>
@@ -434,26 +455,22 @@ export const ChatPlayground: React.FC<ChatPlaygroundProps> = ({
               </div>
 
               <div className="compare-panel compare-panel--tuned">
-                <div className="mb-3 flex items-center justify-between border-b border-emerald-100 pb-2">
-                  <div className="flex items-center gap-2">
-                    <span className="h-2 w-2 rounded-full bg-emerald-500" />
-                    <span className="text-xs font-bold text-emerald-900">Fine-tuned model</span>
+                <div className="compare-panel__header">
+                  <div>
+                    <span className="compare-panel__eyebrow">FINE-TUNED</span>
+                    <strong>Adapted model</strong>
                   </div>
-                  <span className="font-mono text-[10px] text-emerald-600">Adapted</span>
+                  <span className="compare-panel__dot compare-panel__dot--tuned" />
                 </div>
-                <div className="compare-panel__body space-y-3">
+                <div className="compare-panel__body">
                   {compareMessages.finetuned.map((msg) => (
-                    <div key={msg.id} className={'flex gap-2 text-xs ' + (msg.role === 'user' ? 'justify-end' : '')}>
+                    <div key={msg.id} className={'compare-message ' + (msg.role === 'user' ? 'compare-message--user' : '')}>
                       {msg.role === 'assistant' && (
-                        <div className="chat-avatar h-6 w-6 flex-basis-[24px] bg-emerald-600 text-white">
+                        <div className="chat-avatar chat-avatar--tuned chat-avatar--small">
                           <Sparkles className="h-3.5 w-3.5" />
                         </div>
                       )}
-                      <div className={'max-w-[88%] rounded-xl px-3 py-2 leading-relaxed ' + (
-                        msg.role === 'user'
-                          ? 'bg-indigo-600 text-white'
-                          : 'border border-emerald-200 bg-white text-slate-800'
-                      )}>
+                      <div className={'compare-bubble ' + (msg.role === 'user' ? 'compare-bubble--user' : '')}>
                         {msg.content || (isGenerating ? 'Thinking…' : '')}
                       </div>
                     </div>
@@ -464,93 +481,119 @@ export const ChatPlayground: React.FC<ChatPlaygroundProps> = ({
           </div>
         ) : (
           <div className="chat-scroll">
-            <div className="mx-auto w-full max-w-3xl">
-              {messages.map((msg) => (
-                <div
-                  key={msg.id}
-                  className={'chat-message-row ' + (msg.role === 'user' ? 'chat-message-row--user' : '')}
-                >
-                  {msg.role === 'assistant' && (
-                    <div className="chat-avatar chat-avatar--assistant">
-                      <Bot className="h-4 w-4" />
-                    </div>
-                  )}
+            {isWelcomeState ? (
+              <div className="chat-welcome">
+                <div className="chat-welcome__icon">
+                  <MessageSquare className="h-5 w-5" />
+                </div>
+                <div className="chat-welcome__eyebrow">LOCAL CONVERSATION</div>
+                <h2>Chat with your local model</h2>
+                <p>{messages[0].content}</p>
+                <div className="chat-welcome__details">
+                  <span><span className="chat-welcome__status-dot" /> Runs in your browser</span>
+                  <span>{isFinetuned ? 'Fine-tuned weights active' : 'Base weights active'}</span>
+                </div>
+                <div className="chat-welcome__prompts">
+                  {samplePrompts.slice(0, 4).map((prompt, idx) => (
+                    <button
+                      key={idx}
+                      onClick={() => handleSendMessage(prompt)}
+                      disabled={isGenerating}
+                      title={prompt}
+                    >
+                      <span>{prompt}</span>
+                      <Send className="h-3.5 w-3.5" />
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ) : (
+              <div className="chat-thread">
+                {messages.map((msg) => (
+                  <div
+                    key={msg.id}
+                    className={'chat-message-row ' + (msg.role === 'user' ? 'chat-message-row--user' : '')}
+                  >
+                    {msg.role === 'assistant' && (
+                      <div className="chat-avatar chat-avatar--assistant">
+                        <Bot className="h-4 w-4" />
+                      </div>
+                    )}
 
-                  <div className={'chat-bubble ' + (msg.role === 'user' ? 'chat-bubble--user' : 'chat-bubble--assistant')}>
-                    {msg.role === 'assistant' && msg.tokens && msg.tokens.length > 0 ? (
-                      <div>
-                        <div>{msg.content}</div>
-                        <div className="chat-token-meta">
-                          <div className="flex items-center justify-between gap-3">
-                            <span>
-                              {msg.tokens.length} tokens
-                              {tokenStreamFor === msg.id ? '' : ' · inspectable'}
-                            </span>
-                            <button
-                              onClick={() => setTokenStreamFor((prev) => (prev === msg.id ? null : msg.id))}
-                              className="inline-flex items-center gap-1 font-semibold text-indigo-600 hover:text-indigo-800"
-                            >
-                              <Info className="h-3 w-3" />
-                              {tokenStreamFor === msg.id ? 'Hide stream' : 'Inspect tokens'}
-                            </button>
+                    <div className={'chat-bubble ' + (msg.role === 'user' ? 'chat-bubble--user' : 'chat-bubble--assistant')}>
+                      {msg.role === 'assistant' && msg.tokens && msg.tokens.length > 0 ? (
+                        <div>
+                          <div>{msg.content}</div>
+                          <div className="chat-token-meta">
+                            <div className="flex items-center justify-between gap-3">
+                              <span>{msg.tokens.length} tokens generated</span>
+                              <button
+                                onClick={() => setTokenStreamFor((prev) => (prev === msg.id ? null : msg.id))}
+                                className="inline-flex items-center gap-1 font-semibold text-indigo-600 hover:text-indigo-800"
+                              >
+                                <Info className="h-3 w-3" />
+                                {tokenStreamFor === msg.id ? 'Hide' : 'Inspect'}
+                              </button>
+                            </div>
+                            {tokenStreamFor === msg.id && (
+                              <div className="mt-2 flex flex-wrap gap-1 rounded-lg border border-slate-200 bg-white p-2">
+                                {msg.tokens.map((tok, i) => (
+                                  <button
+                                    key={i}
+                                    onClick={() => setInspectedToken(tok)}
+                                    title={'Token: ' + JSON.stringify(tok.token) + ', ID: ' + tok.id + ', Prob: ' + (tok.prob * 100).toFixed(1) + '%'}
+                                    className="rounded border border-transparent px-1 py-0.5 font-sans text-slate-800 hover:border-indigo-200 hover:bg-indigo-50"
+                                  >
+                                    {tok.token === ' ' ? '␣' : tok.token}
+                                  </button>
+                                ))}
+                              </div>
+                            )}
                           </div>
-
-                          {tokenStreamFor === msg.id && (
-                            <div className="mt-2 flex flex-wrap gap-1 rounded-lg border border-slate-200 bg-white p-2">
-                              {msg.tokens.map((tok, i) => (
-                                <button
-                                  key={i}
-                                  onClick={() => setInspectedToken(tok)}
-                                  title={'Token: ' + JSON.stringify(tok.token) + ', ID: ' + tok.id + ', Prob: ' + (tok.prob * 100).toFixed(1) + '%'}
-                                  className="rounded border border-transparent px-1 py-0.5 font-sans text-slate-800 hover:border-indigo-200 hover:bg-indigo-50 hover:text-indigo-900"
-                                >
-                                  {tok.token === ' ' ? '␣' : tok.token}
-                                </button>
-                              ))}
+                        </div>
+                      ) : (
+                        <div>
+                          {msg.content}
+                          {isGenerating && msg.role === 'assistant' && msg.content === '' && (
+                            <div className="flex items-center gap-2 py-1 text-slate-400">
+                              <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-indigo-500" />
+                              <span className="text-xs">Generating locally…</span>
                             </div>
                           )}
                         </div>
-                      </div>
-                    ) : (
-                      <div>
-                        {msg.content}
-                        {isGenerating && msg.role === 'assistant' && msg.content === '' && (
-                          <div className="flex items-center gap-2 py-1 text-slate-400">
-                            <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-indigo-500" />
-                            <span className="text-xs">Generating locally…</span>
-                          </div>
-                        )}
+                      )}
+                    </div>
+
+                    {msg.role === 'user' && (
+                      <div className="chat-avatar chat-avatar--user">
+                        <User className="h-4 w-4" />
                       </div>
                     )}
                   </div>
-
-                  {msg.role === 'user' && (
-                    <div className="chat-avatar chat-avatar--user">
-                      <User className="h-4 w-4" />
-                    </div>
-                  )}
-                </div>
-              ))}
-              <div ref={chatEndRef} />
-            </div>
+                ))}
+                <div ref={chatEndRef} />
+              </div>
+            )}
           </div>
         )}
       </div>
 
-      <div className="chat-suggestions" aria-label="Suggested prompts">
-        <span className="chat-suggestions__label">Try</span>
-        {samplePrompts.map((prompt, idx) => (
-          <button
-            key={idx}
-            onClick={() => handleSendMessage(prompt)}
-            disabled={isGenerating}
-            className="chat-suggestion disabled:cursor-not-allowed disabled:opacity-50"
-            title={prompt}
-          >
-            {prompt}
-          </button>
-        ))}
-      </div>
+      {!isWelcomeState && (
+        <div className="chat-suggestions" aria-label="Suggested prompts">
+          <span className="chat-suggestions__label">Suggestions</span>
+          {samplePrompts.map((prompt, idx) => (
+            <button
+              key={idx}
+              onClick={() => handleSendMessage(prompt)}
+              disabled={isGenerating}
+              className="chat-suggestion disabled:cursor-not-allowed disabled:opacity-50"
+              title={prompt}
+            >
+              {prompt}
+            </button>
+          ))}
+        </div>
+      )}
 
       <div className="chat-composer">
         <form
@@ -560,6 +603,9 @@ export const ChatPlayground: React.FC<ChatPlaygroundProps> = ({
             handleSendMessage();
           }}
         >
+          <div className="chat-composer__leading" aria-hidden="true">
+            <Bot className="h-4 w-4" />
+          </div>
           <input
             type="text"
             id="chat-input"
