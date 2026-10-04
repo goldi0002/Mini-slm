@@ -39,6 +39,8 @@ export interface EvaluationResult {
   isPassed: boolean;
 }
 
+export const TARGET_LOSS = 0.3;
+
 export interface EvaluationSummary {
   totalTurns: number;
   passedTurns: number;
@@ -543,16 +545,22 @@ export const FineTuningStudio: React.FC<FineTuningStudioProps> = ({
   const padding = 30;
 
   const points = trainingState.lossHistory;
-  const maxLoss = points.length > 0 ? Math.max(...points.map((p) => p.loss), 1.0) : 4.0;
-  const minLoss = points.length > 0 ? Math.min(...points.map((p) => p.loss), 0.0) : 0.0;
-  const lossRange = Math.max(0.1, maxLoss - minLoss);
+  const initialLoss = points.length > 0 ? points[0].loss : 0;
+  const currentLoss = trainingState.currentLoss || (points.length > 0 ? points[points.length - 1].loss : 0);
+  const maxObservedLoss = points.length > 0 ? Math.max(...points.map((p) => p.loss)) : 1;
+  const minObservedLoss = points.length > 0 ? Math.min(...points.map((p) => p.loss)) : TARGET_LOSS;
+  const chartTop = Math.max(maxObservedLoss, initialLoss, TARGET_LOSS) + 0.15;
+  const chartBottom = Math.min(minObservedLoss, TARGET_LOSS) - 0.15;
+  const lossRange = Math.max(0.2, chartTop - chartBottom);
+  const lossImprovement = initialLoss > 0 ? Math.max(0, ((initialLoss - currentLoss) / initialLoss) * 100) : 0;
+  const targetGap = Math.max(0, currentLoss - TARGET_LOSS);
 
   const getSvgCoordinates = (point: LossPoint, idx: number) => {
     const x = padding + (idx / Math.max(1, points.length - 1)) * (chartWidth - padding * 2);
     const y =
       chartHeight -
       padding -
-      ((point.loss - minLoss) / lossRange) * (chartHeight - padding * 2);
+      ((point.loss - chartBottom) / lossRange) * (chartHeight - padding * 2);
     return `${x},${y}`;
   };
 
@@ -563,13 +571,13 @@ export const FineTuningStudio: React.FC<FineTuningStudioProps> = ({
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4 space-y-4">
       {/* Header Banner */}
-      <div className="bg-white border border-slate-200 rounded-xl p-4 shadow-2xs flex flex-wrap items-center justify-between gap-4">
+      <div className="bg-white border border-slate-200 rounded-xl p-4 shadow-2xs flex flex-col sm:flex-row sm:flex-wrap sm:items-center sm:justify-between gap-3 min-w-0">
         <div>
-          <div className="flex items-center gap-2">
-            <span className="p-1.5 bg-amber-50 text-amber-600 rounded-lg border border-amber-200">
+          <div className="flex items-start sm:items-center gap-2 min-w-0">
+            <span className="p-1.5 shrink-0 bg-amber-50 text-amber-600 rounded-lg border border-amber-200">
               <TrendingDown className="w-5 h-5" />
             </span>
-            <h2 className="text-base font-bold text-slate-900">
+            <h2 className="text-base font-bold text-slate-900 break-words">
               Conversational Fine-Tuning Studio
             </h2>
             <span className="text-[11px] bg-emerald-50 text-emerald-700 px-2 py-0.5 rounded-md border border-emerald-200 font-medium flex items-center gap-1">
@@ -583,7 +591,7 @@ export const FineTuningStudio: React.FC<FineTuningStudioProps> = ({
         </div>
 
         {/* Action Controls */}
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
           {trainingState.isTraining && !trainingState.isPaused ? (
             <button
               onClick={pauseTraining}
@@ -627,9 +635,9 @@ export const FineTuningStudio: React.FC<FineTuningStudioProps> = ({
         </div>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start min-w-0">
         {/* Left Column: Dataset & Hyperparameters */}
-        <div className="space-y-4">
+        <div className="lg:col-span-4 space-y-4 min-w-0">
           {/* Dataset Scale Selector (Supports Big Datasets) */}
           <div className="bg-white border border-slate-200 rounded-xl p-4 shadow-2xs space-y-3">
             <div className="flex items-center justify-between">
@@ -642,7 +650,7 @@ export const FineTuningStudio: React.FC<FineTuningStudioProps> = ({
               </span>
             </div>
 
-            <div className="grid grid-cols-3 gap-1.5 text-xs">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-1.5 text-xs min-w-0">
               <button
                 type="button"
                 onClick={() => !trainingState.isTraining && setDatasetScale('standard')}
@@ -812,10 +820,10 @@ export const FineTuningStudio: React.FC<FineTuningStudioProps> = ({
         </div>
 
         {/* Center & Right Column: Metrics & Live Loss Curve */}
-        <div className="lg:col-span-2 space-y-4">
+        <div className="lg:col-span-8 space-y-4 min-w-0">
           {/* Progress & Loss Card */}
-          <div className="bg-white border border-slate-200 rounded-xl p-4 shadow-2xs space-y-4">
-            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+          <div className="bg-white border border-slate-200 rounded-xl p-4 shadow-2xs space-y-4 min-w-0 overflow-hidden">
+            <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b border-slate-100 min-w-0">
               <div className="flex items-center gap-2">
                 <LineChart className="w-4 h-4 text-indigo-600" />
                 <h3 className="text-sm font-bold text-slate-900">
@@ -834,7 +842,7 @@ export const FineTuningStudio: React.FC<FineTuningStudioProps> = ({
             </div>
 
             {/* Quick Metrics Dashboard */}
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-center">
+            <div className="grid grid-cols-2 xl:grid-cols-4 gap-2.5 text-center min-w-0">
               <div className="bg-slate-50 border border-slate-200 rounded-lg p-2.5">
                 <span className="text-[11px] text-slate-500 block">Current Loss</span>
                 <span className="text-base font-bold font-mono text-indigo-600">
@@ -862,14 +870,29 @@ export const FineTuningStudio: React.FC<FineTuningStudioProps> = ({
                   {memoryStats.totalMemoryFormatted}
                 </span>
               </div>
+
+              <div className="col-span-2 xl:col-span-4 grid grid-cols-1 sm:grid-cols-3 gap-2">
+                <div className="rounded-lg border border-emerald-200 bg-emerald-50/70 p-2.5 text-left">
+                  <span className="text-[11px] text-emerald-700 block">Target Loss</span>
+                  <span className="text-base font-bold font-mono text-emerald-800">{TARGET_LOSS.toFixed(2)}</span>
+                </div>
+                <div className="rounded-lg border border-indigo-200 bg-indigo-50/70 p-2.5 text-left">
+                  <span className="text-[11px] text-indigo-700 block">Improvement</span>
+                  <span className="text-base font-bold font-mono text-indigo-800">{lossImprovement.toFixed(1)}%</span>
+                </div>
+                <div className="rounded-lg border border-amber-200 bg-amber-50/70 p-2.5 text-left">
+                  <span className="text-[11px] text-amber-700 block">Gap to Target</span>
+                  <span className="text-base font-bold font-mono text-amber-800">{targetGap.toFixed(3)}</span>
+                </div>
+              </div>
             </div>
 
             {/* SVG Loss Curve */}
-            <div className="bg-slate-900 rounded-xl p-3 relative overflow-hidden">
-              <div className="flex items-center justify-between text-[11px] text-slate-400 mb-2 px-1">
-                <span>Loss: {maxLoss.toFixed(2)}</span>
-                <span className="font-mono text-indigo-400">Cross-Entropy Optimization</span>
-                <span>Loss: {minLoss.toFixed(2)}</span>
+            <div className="bg-slate-900 rounded-xl p-3 relative overflow-hidden min-w-0">
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-1 text-[10px] sm:text-[11px] text-slate-400 mb-2 px-1">
+                <span>Top: {chartTop.toFixed(2)}</span>
+                <span className="font-mono text-indigo-400 text-center">Target: {TARGET_LOSS.toFixed(2)}</span>
+                <span className="text-right">Bottom: {chartBottom.toFixed(2)}</span>
               </div>
 
               <div className="w-full h-44 flex items-center justify-center">
@@ -888,12 +911,12 @@ export const FineTuningStudio: React.FC<FineTuningStudioProps> = ({
                     />
                     <line
                       x1={padding}
-                      y1={padding}
+                      y1={chartHeight - padding - ((TARGET_LOSS - chartBottom) / lossRange) * (chartHeight - padding * 2)}
                       x2={chartWidth - padding}
-                      y2={padding}
-                      stroke="#334155"
-                      strokeWidth="1"
-                      strokeDasharray="4 4"
+                      y2={chartHeight - padding - ((TARGET_LOSS - chartBottom) / lossRange) * (chartHeight - padding * 2)}
+                      stroke="#34d399"
+                      strokeWidth="1.5"
+                      strokeDasharray="6 4"
                     />
 
                     <polyline
@@ -947,7 +970,7 @@ export const FineTuningStudio: React.FC<FineTuningStudioProps> = ({
               </button>
             </div>
 
-            <div className="space-y-2 max-h-56 overflow-y-auto">
+            <div className="space-y-2 max-h-56 overflow-y-auto min-w-0">
               {trainingState.sampleOutputs.length > 0 ? (
                 trainingState.sampleOutputs.map((out, idx) => (
                   <div
@@ -1011,7 +1034,7 @@ export const FineTuningStudio: React.FC<FineTuningStudioProps> = ({
             {/* Scorecard Strip */}
             {evalState.summary ? (
               <div className="space-y-4">
-                <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2.5">
+                <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-2.5 min-w-0">
                   <div className="bg-slate-50 border border-slate-200 rounded-lg p-3">
                     <span className="text-[11px] font-medium text-slate-500 block">Avg Word Match</span>
                     <span className="text-lg font-bold text-slate-900">
@@ -1079,8 +1102,8 @@ export const FineTuningStudio: React.FC<FineTuningStudioProps> = ({
                       key={res.turnId}
                       className="p-3 bg-slate-50 rounded-lg border border-slate-200 text-xs space-y-1.5"
                     >
-                      <div className="flex items-center justify-between">
-                        <div className="flex items-center gap-2">
+                      <div className="flex flex-wrap items-start justify-between gap-2">
+                        <div className="flex flex-wrap items-center gap-2 min-w-0">
                           <span className="font-semibold text-slate-700 text-[11px]">
                             Turn {idx + 1}
                           </span>
@@ -1106,17 +1129,17 @@ export const FineTuningStudio: React.FC<FineTuningStudioProps> = ({
                         </div>
                       </div>
 
-                      <div className="text-[11px] text-slate-600">
+                      <div className="text-[11px] text-slate-600 break-words">
                         <span className="font-semibold text-slate-800">Q: </span>
                         {res.prompt}
                       </div>
 
-                      <div className="text-[11px] text-slate-500 pl-2 border-l-2 border-slate-300">
+                      <div className="text-[11px] text-slate-500 pl-2 border-l-2 border-slate-300 break-words">
                         <span className="font-semibold text-slate-600">Expected: </span>
                         {res.target}
                       </div>
 
-                      <div className="text-[11px] text-indigo-950 font-medium pl-2 border-l-2 border-indigo-400 bg-white/60 py-1 rounded-r">
+                      <div className="text-[11px] text-indigo-950 font-medium pl-2 border-l-2 border-indigo-400 bg-white/60 py-1 rounded-r break-words">
                         <span className="font-semibold text-indigo-700">Model Output: </span>
                         {res.predicted}
                       </div>
