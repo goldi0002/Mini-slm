@@ -997,7 +997,6 @@ async function runTestSuite() {
     const multiAvg = trainTurns.reduce((sum, turn) => sum + responseLossForTurn(multi, turn), 0) / trainTurns.length;
     console.log('  📈 DIAG Multi-turn full response loss @0.30: ' + multiAvg.toFixed(3) + ' after 70 epochs / ' + (70 * trainTurns.length) + ' steps (target 0.30)');
   }
-  }
 
   // -------------------------------------------------------------
   // Test ISS-20: retrieval is reported, and the studio scores held-out turns
