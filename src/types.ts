@@ -39,6 +39,8 @@ export interface ChatMessage {
   timestamp: number;
   tokens?: GeneratedTokenInfo[];
   modelSource?: 'base' | 'finetuned';
+  /** Local knowledge sources retrieved for this response. */
+  knowledgeSources?: string[];
 }
 
 export interface TrainingHyperparams {
