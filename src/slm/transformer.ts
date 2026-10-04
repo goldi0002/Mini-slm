@@ -285,7 +285,6 @@ export class SmallLanguageModel {
   // gives SGD the history it needs to cross the shallow plateaus visible in
   // browser fine-tuning without the 2x extra memory cost of full Adam.
   private optimizerVelocity = new WeakMap<Float32Array, Float32Array>();
-  private optimizerStep = 0;
 
   // Gradient buffers for the full backpropagation path (see backwardFull).
   private weightGrads: WeightGradients | null = null;
@@ -622,7 +621,6 @@ export class SmallLanguageModel {
     // Reset optimizer history too: momentum from a previous fine-tune must not
     // leak into a fresh run after the user restores the base checkpoint.
     this.optimizerVelocity = new WeakMap<Float32Array, Float32Array>();
-    this.optimizerStep = 0;
 
     // The weights are back at the base checkpoint, so no adaptation is left.
     this.fullFineTuneApplied = false;
@@ -1981,9 +1979,7 @@ export class SmallLanguageModel {
     // therefore keep the original full-sequence objective.
     const assistantIdx = seqTokens.lastIndexOf(ASSISTANT_ID);
     const lossStartIndex = assistantIdx >= 0 ? assistantIdx + 1 : 0;
-    if (loraTraining || !loraMode) this.optimizerStep++;
-
-    // Forward pass, retaining the activations both backward passes need.
+     // Forward pass, retaining the activations both backward passes need.
     const { logits } = this.forward(seqTokens, loraMode, true);
 
     // A full retrain leaves the LoRA adapters at zero, so record the adaptation
