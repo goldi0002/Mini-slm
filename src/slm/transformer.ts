@@ -285,6 +285,7 @@ export class SmallLanguageModel {
   // gives SGD the history it needs to cross the shallow plateaus visible in
   // browser fine-tuning without the 2x extra memory cost of full Adam.
   private optimizerVelocity = new WeakMap<Float32Array, Float32Array>();
+  private optimizerVelocityBuffers: Float32Array[] = [];
 
   // Gradient buffers for the full backpropagation path (see backwardFull).
   private weightGrads: WeightGradients | null = null;
@@ -621,6 +622,7 @@ export class SmallLanguageModel {
     // Reset optimizer history too: momentum from a previous fine-tune must not
     // leak into a fresh run after the user restores the base checkpoint.
     this.optimizerVelocity = new WeakMap<Float32Array, Float32Array>();
+    this.optimizerVelocityBuffers = [];
 
     // The weights are back at the base checkpoint, so no adaptation is left.
     this.fullFineTuneApplied = false;
@@ -982,6 +984,9 @@ export class SmallLanguageModel {
         this.dLora_vB.length +
         this.adapterRow.length;
     }
+    // Momentum keeps one velocity buffer per trainable tensor.
+    for (const velocity of this.optimizerVelocityBuffers) floats += velocity.length;
+
     // Full backpropagation holds one gradient buffer per base weight.
     const grads = this.weightGrads;
     if (grads) {
@@ -1015,6 +1020,7 @@ export class SmallLanguageModel {
     if (!velocity) {
       velocity = new Float32Array(param.length);
       this.optimizerVelocity.set(param, velocity);
+      this.optimizerVelocityBuffers.push(velocity);
     }
 
     // Momentum SGD: average the sequence gradient first, then keep 90% of the
