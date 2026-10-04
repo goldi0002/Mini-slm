@@ -532,7 +532,7 @@ export class SmallLanguageModel {
     useLora = true,
     allowRetrieval = true
   ): AsyncGenerator<GeneratedTokenInfo> {
-    if (this.config.id === 'smollm2-360m-instruct') {
+    if (this.config.id === 'smollm2-135m-instruct') {
       yield* generatePretrainedStream(prompt, options);
       return;
     }
