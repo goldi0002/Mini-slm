@@ -76,7 +76,7 @@ export const Header: React.FC<HeaderProps> = ({
           </div>
 
           {/* Model Selector and Reset */}
-          <div className="grid grid-cols-1 xs:grid-cols-2 sm:flex sm:flex-wrap items-stretch sm:items-center justify-end gap-2 w-full sm:w-auto">
+          <div className="grid grid-cols-2 sm:flex sm:flex-wrap items-stretch sm:items-center justify-end gap-2 w-full sm:w-auto">
             <div className="relative max-w-full">
               <select
                 id="model-selector"
@@ -150,7 +150,7 @@ export const Header: React.FC<HeaderProps> = ({
           <button
             onClick={() => setActiveTab('train')}
             id="nav-train-tab"
-            className={`px-3.5 py-1.5 text-xs font-medium rounded-lg transition-all flex items-center gap-2 cursor-pointer ${
+            className={`shrink-0 px-3 py-1.5 text-[11px] sm:text-xs font-medium rounded-lg transition-all flex items-center gap-1.5 sm:gap-2 cursor-pointer ${
               activeTab === 'train'
                 ? 'bg-indigo-50 text-indigo-700 font-semibold shadow-2xs'
                 : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
@@ -163,7 +163,7 @@ export const Header: React.FC<HeaderProps> = ({
           <button
             onClick={() => setActiveTab('datasets')}
             id="nav-datasets-tab"
-            className={`px-3.5 py-1.5 text-xs font-medium rounded-lg transition-all flex items-center gap-2 cursor-pointer ${
+            className={`shrink-0 px-3 py-1.5 text-[11px] sm:text-xs font-medium rounded-lg transition-all flex items-center gap-1.5 sm:gap-2 cursor-pointer ${
               activeTab === 'datasets'
                 ? 'bg-indigo-50 text-indigo-700 font-semibold shadow-2xs'
                 : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
@@ -176,7 +176,7 @@ export const Header: React.FC<HeaderProps> = ({
           <button
             onClick={() => setActiveTab('inspect')}
             id="nav-inspect-tab"
-            className={`px-3.5 py-1.5 text-xs font-medium rounded-lg transition-all flex items-center gap-2 cursor-pointer ${
+            className={`shrink-0 px-3 py-1.5 text-[11px] sm:text-xs font-medium rounded-lg transition-all flex items-center gap-1.5 sm:gap-2 cursor-pointer ${
               activeTab === 'inspect'
                 ? 'bg-indigo-50 text-indigo-700 font-semibold shadow-2xs'
                 : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
