@@ -996,6 +996,22 @@ async function runTestSuite() {
     }
     const multiAvg = trainTurns.reduce((sum, turn) => sum + responseLossForTurn(multi, turn), 0) / trainTurns.length;
     console.log('  📈 DIAG Multi-turn full response loss @0.30: ' + multiAvg.toFixed(3) + ' after 70 epochs / ' + (70 * trainTurns.length) + ' steps (target 0.30)');
+
+    const deep = initializePretrainedModel(PREDEFINED_MODELS[2]);
+    const deepTurns = PREDEFINED_DATASETS[0].turns.filter((_, i) => i % 4 !== 3);
+    for (let epoch = 0; epoch < 70; epoch++) {
+      for (const turn of deepTurns) {
+        const ts = deep.tokenizer.encode(
+          SPECIAL_TOKENS.USER + ' ' + turn.user + ' ' + SPECIAL_TOKENS.NEWLINE +
+          SPECIAL_TOKENS.ASSISTANT + ' ' + turn.assistant,
+          true,
+          true
+        );
+        deep.trainStep(ts, 0.3, false, 0.0, false);
+      }
+    }
+    const deepAvg = deepTurns.reduce((sum, turn) => sum + responseLossForTurn(deep, turn), 0) / deepTurns.length;
+    console.log('  📈 DIAG Multi-turn deep-model response loss @0.30: ' + deepAvg.toFixed(3) + ' after 70 epochs (target 0.30)');
   }
 
   // -------------------------------------------------------------
