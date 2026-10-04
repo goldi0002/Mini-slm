@@ -54,10 +54,8 @@ export const Header: React.FC<HeaderProps> = ({
             <Bot className="h-5 w-5" strokeWidth={2.2} />
           </div>
           <div className="app-brand__copy">
-            <div className="flex min-w-0 items-center gap-2">
-              <h1 className="truncate text-[15px] font-semibold tracking-tight text-slate-950 sm:text-base">
-                Mini SLM Studio
-              </h1>
+            <div className="app-brand__title-row">
+              <h1>Mini SLM Studio</h1>
               <span className="app-badge app-badge--local">
                 <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
                 Local
@@ -109,6 +107,27 @@ export const Header: React.FC<HeaderProps> = ({
             </button>
           )}
         </div>
+      </div>
+
+      <div className="app-model-row">
+        <span className="app-model-row__label">Model</span>
+        <select
+          id="mobile-model-selector"
+          value={currentModel.id}
+          onChange={(e) => {
+            const selected = models.find((item) => item.id === e.target.value);
+            if (selected) onSelectModel(selected);
+          }}
+          aria-label="Select model"
+          className="app-model-select app-model-select--mobile"
+        >
+          {models.map((model) => (
+            <option key={model.id} value={model.id}>{model.name}</option>
+          ))}
+        </select>
+        <span className="app-model-row__meta">
+          {paramStats.total.toLocaleString()} params · {memoryFormatted}
+        </span>
       </div>
 
       <nav className="app-nav" aria-label="Studio sections">
