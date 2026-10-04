@@ -46,13 +46,13 @@ export const Header: React.FC<HeaderProps> = ({
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 py-2 sm:py-0 sm:h-16 min-w-0">
           
           {/* Logo and Identity */}
-          <div className="flex items-center gap-3 min-w-0">
-            <div className="w-10 h-10 rounded-xl bg-indigo-600 text-white flex items-center justify-center shadow-sm">
+          <div className="flex items-start sm:items-center gap-2 sm:gap-3 min-w-0 flex-1">
+            <div className="w-9 h-9 sm:w-10 sm:h-10 shrink-0 rounded-xl bg-indigo-600 text-white flex items-center justify-center shadow-sm">
               <Bot className="w-5 h-5" />
             </div>
             <div>
-              <div className="flex flex-wrap items-center gap-2 min-w-0">
-                <h1 className="text-base font-bold text-slate-900 leading-none">
+              <div className="flex flex-wrap items-center gap-1.5 sm:gap-2 min-w-0">
+                <h1 className="text-sm sm:text-base font-bold text-slate-900 leading-tight break-words">
                   Conversational SLM
                 </h1>
                 <span className="px-2 py-0.5 text-[11px] font-semibold bg-emerald-50 text-emerald-700 rounded-full border border-emerald-200 flex items-center gap-1">
@@ -76,7 +76,7 @@ export const Header: React.FC<HeaderProps> = ({
           </div>
 
           {/* Model Selector and Reset */}
-          <div className="flex flex-wrap items-center justify-end gap-2 w-full sm:w-auto">
+          <div className="grid grid-cols-2 sm:flex sm:flex-wrap items-stretch sm:items-center justify-end gap-2 w-full sm:w-auto">
             <div className="relative max-w-full">
               <select
                 id="model-selector"
@@ -86,7 +86,7 @@ export const Header: React.FC<HeaderProps> = ({
                   if (m) onSelectModel(m);
                 }}
                 aria-label="Select Small Language Model"
-                className="w-full sm:w-auto max-w-full text-xs font-medium bg-slate-50 hover:bg-slate-100 border border-slate-200 text-slate-800 rounded-lg px-3 py-1.5 focus:outline-hidden focus:ring-2 focus:ring-indigo-500 cursor-pointer pr-8"
+                className="w-full sm:w-auto max-w-full min-w-0 text-xs font-medium bg-slate-50 hover:bg-slate-100 border border-slate-200 text-slate-800 rounded-lg px-3 py-1.5 focus:outline-hidden focus:ring-2 focus:ring-indigo-500 cursor-pointer pr-8"
               >
                 {models.map((mod) => (
                   <option key={mod.id} value={mod.id}>
@@ -123,7 +123,7 @@ export const Header: React.FC<HeaderProps> = ({
                 onClick={onResetToBase}
                 id="reset-base-btn"
                 title="Revert model weights back to base pretrained state"
-                className="text-xs font-medium text-slate-600 hover:text-rose-600 px-2.5 py-1.5 rounded-lg border border-slate-200 hover:border-rose-200 bg-white hover:bg-rose-50 transition-colors flex items-center gap-1.5 cursor-pointer"
+                className="w-full sm:w-auto justify-center text-xs font-medium text-slate-600 hover:text-rose-600 px-2.5 py-1.5 rounded-lg border border-slate-200 hover:border-rose-200 bg-white hover:bg-rose-50 transition-colors flex items-center gap-1.5 cursor-pointer"
               >
                 <RotateCcw className="w-3.5 h-3.5" />
                 <span className="hidden sm:inline">Reset Weights</span>
@@ -137,7 +137,7 @@ export const Header: React.FC<HeaderProps> = ({
           <button
             onClick={() => setActiveTab('chat')}
             id="nav-chat-tab"
-            className={`px-3.5 py-1.5 text-xs font-medium rounded-lg transition-all flex items-center gap-2 cursor-pointer ${
+            className={`shrink-0 px-3 py-1.5 text-[11px] sm:text-xs font-medium rounded-lg transition-all flex items-center gap-1.5 sm:gap-2 cursor-pointer ${
               activeTab === 'chat'
                 ? 'bg-indigo-50 text-indigo-700 font-semibold shadow-2xs'
                 : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
@@ -150,7 +150,7 @@ export const Header: React.FC<HeaderProps> = ({
           <button
             onClick={() => setActiveTab('train')}
             id="nav-train-tab"
-            className={`px-3.5 py-1.5 text-xs font-medium rounded-lg transition-all flex items-center gap-2 cursor-pointer ${
+            className={`shrink-0 px-3 py-1.5 text-[11px] sm:text-xs font-medium rounded-lg transition-all flex items-center gap-1.5 sm:gap-2 cursor-pointer ${
               activeTab === 'train'
                 ? 'bg-indigo-50 text-indigo-700 font-semibold shadow-2xs'
                 : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
@@ -163,7 +163,7 @@ export const Header: React.FC<HeaderProps> = ({
           <button
             onClick={() => setActiveTab('datasets')}
             id="nav-datasets-tab"
-            className={`px-3.5 py-1.5 text-xs font-medium rounded-lg transition-all flex items-center gap-2 cursor-pointer ${
+            className={`shrink-0 px-3 py-1.5 text-[11px] sm:text-xs font-medium rounded-lg transition-all flex items-center gap-1.5 sm:gap-2 cursor-pointer ${
               activeTab === 'datasets'
                 ? 'bg-indigo-50 text-indigo-700 font-semibold shadow-2xs'
                 : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
@@ -176,7 +176,7 @@ export const Header: React.FC<HeaderProps> = ({
           <button
             onClick={() => setActiveTab('inspect')}
             id="nav-inspect-tab"
-            className={`px-3.5 py-1.5 text-xs font-medium rounded-lg transition-all flex items-center gap-2 cursor-pointer ${
+            className={`shrink-0 px-3 py-1.5 text-[11px] sm:text-xs font-medium rounded-lg transition-all flex items-center gap-1.5 sm:gap-2 cursor-pointer ${
               activeTab === 'inspect'
                 ? 'bg-indigo-50 text-indigo-700 font-semibold shadow-2xs'
                 : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'

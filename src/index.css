@@ -31,11 +31,42 @@
   select,
   textarea {
     max-width: 100%;
+    min-width: 0;
+  }
+
+  img,
+  svg,
+  video,
+  canvas {
+    max-width: 100%;
+  }
+
+  button,
+  [role="button"] {
+    touch-action: manipulation;
+  }
+
+  input,
+  select,
+  textarea {
+    font-size: 16px;
   }
 
   @media (max-width: 640px) {
+    html,
     body {
       overflow-x: hidden;
+      width: 100%;
+    }
+
+    body {
+      min-height: 100dvh;
+    }
+  }
+
+  @media (max-width: 480px) {
+    .mobile-safe-card {
+      border-radius: 0.75rem;
     }
   }
 }

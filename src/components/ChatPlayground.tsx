@@ -321,10 +321,10 @@ export const ChatPlayground: React.FC<ChatPlaygroundProps> = ({
   ];
 
   return (
-    <div className="flex flex-col h-[calc(100vh-8.5rem)] max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
+    <div className="flex flex-col min-h-[calc(100dvh-10rem)] sm:h-[calc(100dvh-8.5rem)] max-w-7xl mx-auto w-full min-w-0 px-3 sm:px-6 lg:px-8 py-3 sm:py-4">
       {/* Top Controls Bar */}
-      <div className="bg-white border border-slate-200 rounded-xl p-3 mb-3 shadow-2xs flex flex-wrap items-center justify-between gap-3">
-        <div className="flex items-center gap-2">
+      <div className="bg-white border border-slate-200 rounded-xl p-3 mb-3 shadow-2xs flex flex-col sm:flex-row sm:flex-wrap sm:items-center sm:justify-between gap-3 min-w-0">
+        <div className="flex flex-wrap items-center gap-2 min-w-0">
           <button
             onClick={() => setComparisonMode(!comparisonMode)}
             id="toggle-comparison-btn"
@@ -335,7 +335,7 @@ export const ChatPlayground: React.FC<ChatPlaygroundProps> = ({
             }`}
           >
             <Columns className="w-3.5 h-3.5" />
-            <span>{comparisonMode ? 'Side-by-Side Active' : 'Compare Base vs Fine-Tuned'}</span>
+            <span className="truncate">{comparisonMode ? 'Side-by-Side Active' : 'Compare Base vs Fine-Tuned'}</span>
           </button>
 
           {isFinetuned && (
@@ -346,7 +346,7 @@ export const ChatPlayground: React.FC<ChatPlaygroundProps> = ({
           )}
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
           <button
             onClick={() => setShowSettings(!showSettings)}
             id="toggle-settings-btn"
