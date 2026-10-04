@@ -771,7 +771,7 @@ export const FineTuningStudio: React.FC<FineTuningStudioProps> = ({
               <div className="grid grid-cols-2 gap-2 text-xs">
                 <button
                   type="button"
-                  onClick={() => setHyperparams({ ...hyperparams, loraMode: true })}
+                  onClick={() => setHyperparams({ ...hyperparams, loraMode: true, learningRate: 0.03, epochs: Math.min(hyperparams.epochs, 50) })}
                   disabled={trainingState.isTraining}
                   className={`p-2 rounded-lg border font-medium text-center transition-all cursor-pointer ${
                     hyperparams.loraMode
@@ -783,7 +783,7 @@ export const FineTuningStudio: React.FC<FineTuningStudioProps> = ({
                 </button>
                 <button
                   type="button"
-                  onClick={() => setHyperparams({ ...hyperparams, loraMode: false })}
+                  onClick={() => setHyperparams({ ...hyperparams, loraMode: false, learningRate: FULL_RETRAIN_TARGET_LR, epochs: Math.max(hyperparams.epochs, DEFAULT_TRAINING_EPOCHS) })}
                   disabled={trainingState.isTraining}
                   className={`p-2 rounded-lg border font-medium text-center transition-all cursor-pointer ${
                     !hyperparams.loraMode
@@ -795,6 +795,10 @@ export const FineTuningStudio: React.FC<FineTuningStudioProps> = ({
                 </button>
               </div>
             </div>
+
+            <p className="text-[11px] text-slate-500">
+              The training target is <span className="font-semibold text-emerald-700">0.30 response loss</span>. It is an in-sample fit target; held-out loss below is the generalization check.
+            </p>
 
             {regimeAdvisory && (
               <div className="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 p-2.5 text-[11px] leading-relaxed text-amber-800">
