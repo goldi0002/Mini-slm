@@ -46,7 +46,7 @@ function parseConversation(prompt: string): Array<{ role: string; content: strin
     turns.push({ role: 'user', content: prompt.trim() });
   }
 
-  return turns;
+  return turns.filter((turn) => turn.content.length > 0);
 }
 
 function generatedText(output: unknown): string {
