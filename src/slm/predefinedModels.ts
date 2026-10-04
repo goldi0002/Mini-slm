@@ -60,9 +60,9 @@ ensureVocabulary();
 
 export const PREDEFINED_MODELS: ModelConfig[] = [
   {
-    id: 'minislm-1m',
-    name: 'MiniSLM 1.4M (Fast Adapt)',
-    tagline: '4 Layers • 192-dim • 6 Heads • 384 FFN • ~1.4M params • Fast LoRA + memory learning',
+    id: 'smollm2-360m-instruct',
+    name: 'SmolLM2 360M Instruct (Local)',
+    tagline: '360M pretrained parameters • Apache-2.0 • WebGPU/WASM • Runs locally in your browser',
     vocabSize: defaultTokenizer.vocabSize,
     dModel: 192,
     nHeads: 6,
@@ -120,14 +120,12 @@ export function initializePretrainedModel(config: ModelConfig): SmallLanguageMod
   const modelConfig = { ...config, vocabSize: defaultTokenizer.vocabSize };
   const model = new SmallLanguageModel(modelConfig, defaultTokenizer);
 
-  const conversationalCorpus = PRETRAIN_CORPUS;
-  model.learnCorpus(conversationalCorpus, 1);
+  // The default model is a real pretrained checkpoint loaded by Transformers.js.
+  // The SmallLanguageModel instance is retained as the existing app compatibility
+  // shell for the training/inspection surfaces; chat generation bypasses these
+  // scratch weights and uses the downloaded pretrained checkpoint instead.
 
-  // Skip full neural warm-up for the 1M+ browser model. The memory layer
-  // provides the deterministic conversational prior immediately; LoRA training
-  // in the Studio performs the expensive neural adaptation only when requested.
-
-  // Save the initialized state (weights + memory) as the official Base Snapshot
+  // Save the compatibility shell's initialized state as its Base Snapshot
   model.saveBaseSnapshot();
 
   return model;
