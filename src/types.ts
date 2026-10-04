@@ -15,6 +15,10 @@ export interface ModelConfig {
   maxSeqLen: number; // Maximum context length
   loraRank: number; // LoRA rank r
   loraAlpha: number; // LoRA scaling
+  /** Optional real checkpoint size shown in the UI when this config is a shell. */
+  displayParameterCount?: number;
+  /** Optional downloaded weight size shown in the UI when this config is a shell. */
+  displayMemory?: string;
 }
 
 export interface GenerationOptions {
