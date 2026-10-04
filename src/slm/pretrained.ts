@@ -84,7 +84,7 @@ export async function* generatePretrainedStream(prompt: string, options: Generat
   const pushToken = (ids: bigint[]) => {
     for (const rawId of ids) {
       const id = Number(rawId);
-      const token = generator.tokenizer.decode([rawId], { skip_special_tokens: true }).trim();
+      const token = generator.tokenizer.decode([rawId], { skip_special_tokens: true, clean_up_tokenization_spaces: false });
       if (!token) continue;
       queue.push({ token, id, prob: 1, topCandidates: [{ token, id, prob: 1 }] });
       waiters.shift()?.();
