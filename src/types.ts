@@ -70,6 +70,10 @@ export interface TrainingState {
   currentPerplexity: number;
   /** Diagnostic NLL of the neural + memory blend; not the training objective. */
   currentBlendedLoss: number;
+  /** Average assistant-response loss across the most recent completed epoch. */
+  epochAverageLoss: number;
+  /** True only when the measured training objective reaches TARGET_LOSS. */
+  targetReached: boolean;
   sampleOutputs: Array<{ epoch: number; prompt: string; response: string }>;
 }
 
