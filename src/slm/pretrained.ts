@@ -144,6 +144,17 @@ export async function generatePretrainedReply(prompt: string, options: Generatio
   }
 }
 
+class StreamGenerationError extends Error {
+  constructor(
+    message: string,
+    public readonly emittedTokens: boolean,
+    public readonly cause: unknown,
+  ) {
+    super(message);
+    this.name = 'StreamGenerationError';
+  }
+}
+
 async function* streamWithGenerator(
   generator: Generator,
   prompt: string,
@@ -153,6 +164,7 @@ async function* streamWithGenerator(
   const waiters: Array<() => void> = [];
   let finished = false;
   let failure: unknown = null;
+  let emittedTokens = false;
 
   const pushToken = (ids: bigint[]) => {
     for (const rawId of ids) {
@@ -197,9 +209,18 @@ async function* streamWithGenerator(
       continue;
     }
     const token = queue.shift();
-    if (token) yield token;
+    if (token) {
+      emittedTokens = true;
+      yield token;
+    }
   }
-  if (failure) throw failure;
+  if (failure) {
+    throw new StreamGenerationError(
+      'Pretrained streaming inference failed.',
+      emittedTokens,
+      failure,
+    );
+  }
 }
 
 export async function* generatePretrainedStream(prompt: string, options: GenerationOptions): AsyncGenerator<GeneratedTokenInfo> {
@@ -208,10 +229,14 @@ export async function* generatePretrainedStream(prompt: string, options: Generat
   try {
     yield* streamWithGenerator(generator, prompt, options);
   } catch (error) {
-    // If WebGPU fails before producing a token, retry the same turn on WASM.
-    // This handles mobile GPUs that initialize successfully but fail at the
-    // first compute dispatch.
-    if (generatorDevice !== 'webgpu') throw error;
+    // Only retry if WebGPU failed before producing any visible token. Retrying
+    // after partial output would duplicate the beginning of the response.
+    if (
+      generatorDevice !== 'webgpu' ||
+      (error instanceof StreamGenerationError && error.emittedTokens)
+    ) {
+      throw error instanceof StreamGenerationError ? error.cause : error;
+    }
     console.warn('WebGPU pretrained streaming failed; retrying with WASM.', error);
     generator = await getWasmGenerator();
     yield* streamWithGenerator(generator, prompt, options);
