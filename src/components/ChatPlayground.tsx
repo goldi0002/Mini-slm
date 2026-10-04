@@ -21,6 +21,7 @@ import {
 import { ChatMessage, GenerationOptions, GeneratedTokenInfo } from '../types';
 import { SmallLanguageModel } from '../slm/transformer';
 import { defaultTokenizer } from '../slm/tokenizer';
+import { LocalKnowledgeBase } from '../slm/knowledge';
 import { TokenInspectorModal } from './TokenInspectorModal';
 
 /** Shown when a generation turn produced no tokens at all. */
@@ -40,6 +41,9 @@ interface ChatPlaygroundProps {
   activeDatasetName?: string;
   /** Builds a fresh, never-fine-tuned model used by the comparison view. */
   createBaseModel: () => SmallLanguageModel;
+  knowledgeBase: LocalKnowledgeBase;
+  knowledgeReady: boolean;
+  knowledgeVersion?: number;
 }
 
 export const ChatPlayground: React.FC<ChatPlaygroundProps> = ({
@@ -47,6 +51,8 @@ export const ChatPlayground: React.FC<ChatPlaygroundProps> = ({
   isFinetuned,
   activeDatasetName,
   createBaseModel,
+  knowledgeBase,
+  knowledgeReady,
 }) => {
   const [messages, setMessages] = useState<ChatMessage[]>([
     {
@@ -105,6 +111,15 @@ export const ChatPlayground: React.FC<ChatPlaygroundProps> = ({
   // Lazily-built base checkpoint used only by the comparison view. A separate
   // instance is what makes "Base" actually mean "never fine-tuned".
   const baseModelRef = useRef<{ key: string; model: SmallLanguageModel } | null>(null);
+
+  const buildGroundedPrompt = (text: string, history: Array<{ role: string; content: string }>, tokenizer = model.tokenizer) => {
+    const grounded = knowledgeBase.buildContext(text);
+    const userContent = grounded.context ? `${text}\n\n${grounded.context}` : text;
+    return {
+      prompt: tokenizer.formatConversationPrompt(userContent, history),
+      sources: [...new Set(grounded.hits.map((hit) => hit.documentName))],
+    };
+  };
 
   const getBaseModel = (): SmallLanguageModel => {
     const key = `${model.config.id}:${model.config.vocabSize}:${defaultTokenizer.vocabSize}`;
@@ -177,6 +192,7 @@ export const ChatPlayground: React.FC<ChatPlaygroundProps> = ({
         timestamp: Date.now(),
         tokens: [],
         modelSource: 'finetuned',
+        knowledgeSources: grounded.sources,
       };
 
       setCompareMessages((prev) => ({
@@ -184,10 +200,11 @@ export const ChatPlayground: React.FC<ChatPlaygroundProps> = ({
         finetuned: [...prev.finetuned, ftMsg],
       }));
 
-      const prompt = model.tokenizer.formatConversationPrompt(text, chatHistory());
+      const grounded = buildGroundedPrompt(text, chatHistory());
+      const prompt = grounded.prompt;
       const ftTokens: GeneratedTokenInfo[] = [];
 
-      for await (const tokenInfo of model.generateChatStream(prompt, options, true)) {
+      for await (const tokenInfo of model.generateChatStream(prompt, options, true, grounded.sources.length === 0)) {
         ftTokens.push(tokenInfo);
         const decoded = model.tokenizer.decode(
           ftTokens.map((t) => t.id),
@@ -208,7 +225,8 @@ export const ChatPlayground: React.FC<ChatPlaygroundProps> = ({
       // comparison: the statistical memory layer is shared state that
       // fine-tuning mutates, and it supplies most of the sampling mass.
       const baseModel = getBaseModel();
-      const basePrompt = baseModel.tokenizer.formatConversationPrompt(text, chatHistory());
+      const baseGrounded = buildGroundedPrompt(text, chatHistory(), baseModel.tokenizer);
+      const basePrompt = baseGrounded.prompt;
       const baseId = `base-${Date.now()}`;
       const baseMsg: ChatMessage = {
         id: baseId,
@@ -217,6 +235,7 @@ export const ChatPlayground: React.FC<ChatPlaygroundProps> = ({
         timestamp: Date.now(),
         tokens: [],
         modelSource: 'base',
+        knowledgeSources: baseGrounded.sources,
       };
 
       setCompareMessages((prev) => ({
@@ -225,7 +244,7 @@ export const ChatPlayground: React.FC<ChatPlaygroundProps> = ({
       }));
 
       const baseTokens: GeneratedTokenInfo[] = [];
-      for await (const tokenInfo of baseModel.generateChatStream(basePrompt, options, true)) {
+      for await (const tokenInfo of baseModel.generateChatStream(basePrompt, options, true, baseGrounded.sources.length === 0)) {
         baseTokens.push(tokenInfo);
         const decoded = baseModel.tokenizer.decode(
           baseTokens.map((t) => t.id),
@@ -250,16 +269,18 @@ export const ChatPlayground: React.FC<ChatPlaygroundProps> = ({
         content: '',
         timestamp: Date.now(),
         tokens: [],
+        knowledgeSources: grounded.sources,
       };
 
       setMessages((prev) => [...prev, assistantMsg]);
 
       // Format prompt with conversational history; the engine drops turns the
       // context window cannot hold, so a long chat never stalls generation.
-      const prompt = model.tokenizer.formatConversationPrompt(text, chatHistory());
+      const grounded = buildGroundedPrompt(text, chatHistory());
+      const prompt = grounded.prompt;
 
       const collectedTokens: GeneratedTokenInfo[] = [];
-      for await (const tokenInfo of model.generateChatStream(prompt, options, isFinetuned)) {
+      for await (const tokenInfo of model.generateChatStream(prompt, options, isFinetuned, grounded.sources.length === 0)) {
         collectedTokens.push(tokenInfo);
         const decoded = model.tokenizer.decode(
           collectedTokens.map((t) => t.id),
@@ -331,6 +352,9 @@ export const ChatPlayground: React.FC<ChatPlaygroundProps> = ({
             <div className="min-w-0">
               <strong>{comparisonMode ? 'Model comparison' : 'Conversation'}</strong>
               <span>{comparisonMode ? 'Base vs fine-tuned' : (isFinetuned ? 'Fine-tuned model' : 'Base model')}</span>
+              {knowledgeReady && knowledgeBase.documentCount() > 0 && !comparisonMode && (
+                <span className="chat-toolbar__knowledge">Knowledge active · {knowledgeBase.documentCount()} source{knowledgeBase.documentCount() === 1 ? '' : 's'}</span>
+              )}
             </div>
           </div>
 
@@ -524,6 +548,9 @@ export const ChatPlayground: React.FC<ChatPlaygroundProps> = ({
                       {msg.role === 'assistant' && msg.tokens && msg.tokens.length > 0 ? (
                         <div>
                           <div>{msg.content}</div>
+                          {msg.knowledgeSources && msg.knowledgeSources.length > 0 && (
+                            <div className="chat-knowledge-meta">Grounded in: {msg.knowledgeSources.join(', ')}</div>
+                          )}
                           <div className="chat-token-meta">
                             <div className="flex items-center justify-between gap-3">
                               <span>{msg.tokens.length} tokens generated</span>
