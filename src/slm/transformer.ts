@@ -528,11 +528,12 @@ export class SmallLanguageModel {
   public async *generateChatStream(
     prompt: string,
     options: GenerationOptions,
-    useLora = true
+    useLora = true,
+    allowRetrieval = true
   ): AsyncGenerator<GeneratedTokenInfo> {
     // The two tokens reserved on top of the reply are the reply-opening context
     // `encodeForGeneration` appends.
-    const tokens = this.encodeForGeneration(this.windowPrompt(prompt, options.maxNewTokens + 2));
+    const tokens = this.encodeForGeneration(this.windowPrompt(prompt, options.maxNewTokens + 2), allowRetrieval);
 
     for (let step = 0; step < options.maxNewTokens; step++) {
       const tokenInfo = this.generateNextToken(tokens, options, useLora);
@@ -2419,7 +2420,7 @@ export class SmallLanguageModel {
     return tokens.filter((t) => /[a-z0-9]/i.test(this.tokenizer.getTokenString(t)));
   }
 
-  private encodeForGeneration(prompt: string): number[] {
+  private encodeForGeneration(prompt: string, allowRetrieval = true): number[] {
     const tokens = this.tokenizer.encode(prompt, true, false);
 
     // Seed the memory with the user's last word so the first generated word is
@@ -2437,7 +2438,9 @@ export class SmallLanguageModel {
     const asstIdx = tokens.lastIndexOf(ASSISTANT_ID);
     if (asstIdx >= 0) {
       // Replay the answer fine-tuning learned for this user message.
-      this.caseReply = this.memory.findCase(this.caseWords(this.userContentTokens(tokens, asstIdx)));
+      this.caseReply = allowRetrieval
+        ? this.memory.findCase(this.caseWords(this.userContentTokens(tokens, asstIdx)))
+        : null;
 
       const opening = this.replyOpeningContext(tokens, asstIdx);
       if (opening.length >= 1) {
@@ -2454,9 +2457,10 @@ export class SmallLanguageModel {
   public async *generateStream(
     prompt: string,
     options: GenerationOptions,
-    useLora = true
+    useLora = true,
+    allowRetrieval = true
   ): AsyncGenerator<GeneratedTokenInfo> {
-    const tokens = this.encodeForGeneration(prompt);
+    const tokens = this.encodeForGeneration(prompt, allowRetrieval);
 
     for (let step = 0; step < options.maxNewTokens; step++) {
       const tokenInfo = this.generateNextToken(tokens, options, useLora);
@@ -2477,9 +2481,10 @@ export class SmallLanguageModel {
   public generate(
     prompt: string,
     options: GenerationOptions,
-    useLora = true
+    useLora = true,
+    allowRetrieval = true
   ): { text: string; tokens: GeneratedTokenInfo[] } {
-    const tokens = this.encodeForGeneration(prompt);
+    const tokens = this.encodeForGeneration(prompt, allowRetrieval);
     const generatedInfo: GeneratedTokenInfo[] = [];
 
     for (let step = 0; step < options.maxNewTokens; step++) {
