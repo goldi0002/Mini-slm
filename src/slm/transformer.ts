@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { generatePretrainedStream } from './pretrained';
 import { ModelConfig, GenerationOptions, GeneratedTokenInfo } from '../types';
 import { Tokenizer, defaultTokenizer, BOS_ID, EOS_ID, PAD_ID, UNK_ID, USER_ID, ASSISTANT_ID, NEWLINE_ID } from './tokenizer';
 import { NgramLanguageModel } from './ngram';
@@ -531,6 +532,10 @@ export class SmallLanguageModel {
     useLora = true,
     allowRetrieval = true
   ): AsyncGenerator<GeneratedTokenInfo> {
+    if (this.config.id === 'smollm2-360m-instruct') {
+      yield* generatePretrainedStream(prompt, options);
+      return;
+    }
     // The two tokens reserved on top of the reply are the reply-opening context
     // `encodeForGeneration` appends.
     const tokens = this.encodeForGeneration(this.windowPrompt(prompt, options.maxNewTokens + 2), allowRetrieval);
