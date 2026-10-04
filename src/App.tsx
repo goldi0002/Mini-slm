@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { Header } from './components/Header';
 import { ChatPlayground } from './components/ChatPlayground';
 import { FineTuningStudio } from './components/FineTuningStudio';
@@ -14,6 +14,8 @@ import { PREDEFINED_DATASETS } from './slm/datasets';
 import { defaultTokenizer } from './slm/tokenizer';
 import { DatasetPreset, ModelConfig } from './types';
 import { SmallLanguageModel } from './slm/transformer';
+import { LocalKnowledgeBase } from './slm/knowledge';
+import { KnowledgeManager } from './components/KnowledgeManager';
 
 let initialModel: SmallLanguageModel | null = null;
 function getInitialModel(): SmallLanguageModel {
@@ -28,7 +30,14 @@ export default function App() {
   const [datasets, setDatasets] = useState<DatasetPreset[]>(PREDEFINED_DATASETS);
   const [activeDatasetId, setActiveDatasetId] = useState(PREDEFINED_DATASETS[0].id);
   const [activeDatasetName, setActiveDatasetName] = useState('');
-  const [activeTab, setActiveTab] = useState<'chat' | 'train' | 'inspect' | 'datasets'>('chat');
+  const [activeTab, setActiveTab] = useState<'chat' | 'train' | 'inspect' | 'datasets' | 'knowledge'>('chat');
+  const knowledgeBase = useMemo(() => new LocalKnowledgeBase(), []);
+  const [knowledgeReady, setKnowledgeReady] = useState(false);
+  const [knowledgeVersion, setKnowledgeVersion] = useState(0);
+
+  useEffect(() => {
+    knowledgeBase.load().finally(() => setKnowledgeReady(true));
+  }, [knowledgeBase]);
 
   const syncResetState = () => {
     setIsFinetuned(false);
@@ -77,6 +86,7 @@ export default function App() {
         onResetToBase={handleResetToBase}
         paramStats={paramStats}
         memoryFormatted={model.getMemoryStats().totalMemoryFormatted}
+        knowledgeCount={knowledgeBase.documentCount()}
       />
 
       <main className="app-main">
@@ -87,6 +97,9 @@ export default function App() {
               isFinetuned={isFinetuned}
               activeDatasetName={activeDatasetName}
               createBaseModel={() => initializePretrainedModel(model.config)}
+              knowledgeBase={knowledgeBase}
+              knowledgeReady={knowledgeReady}
+              knowledgeVersion={knowledgeVersion}
             />
           )}
 
@@ -104,6 +117,14 @@ export default function App() {
 
           {activeTab === 'inspect' && (
             <ArchitectureInspector model={model} isFinetuned={isFinetuned} />
+          )}
+
+          {activeTab === 'knowledge' && (
+            <KnowledgeManager
+              knowledgeBase={knowledgeBase}
+              knowledgeReady={knowledgeReady}
+              onChanged={() => setKnowledgeVersion((v) => v + 1)}
+            />
           )}
 
           {activeTab === 'datasets' && (

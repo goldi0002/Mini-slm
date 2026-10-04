@@ -12,6 +12,7 @@ import {
   Sparkles,
   Flame,
   Cpu,
+  BookOpen,
 } from 'lucide-react';
 import { ModelConfig } from '../types';
 import { defaultTokenizer } from '../slm/tokenizer';
@@ -20,18 +21,20 @@ interface HeaderProps {
   models: ModelConfig[];
   currentModel: ModelConfig;
   onSelectModel: (model: ModelConfig) => void;
-  activeTab: 'chat' | 'train' | 'inspect' | 'datasets';
-  setActiveTab: (tab: 'chat' | 'train' | 'inspect' | 'datasets') => void;
+  activeTab: 'chat' | 'train' | 'inspect' | 'datasets' | 'knowledge';
+  setActiveTab: (tab: 'chat' | 'train' | 'inspect' | 'datasets' | 'knowledge') => void;
   isFinetuned: boolean;
   onResetToBase: () => void;
   paramStats: { total: number; trainable: number; loraOnly: number };
   memoryFormatted?: string;
+  knowledgeCount?: number;
 }
 
 const navItems = [
   { id: 'chat' as const, label: 'Chat', icon: Bot },
   { id: 'train' as const, label: 'Fine-tune', icon: Flame },
   { id: 'datasets' as const, label: 'Datasets', icon: Database },
+  { id: 'knowledge' as const, label: 'Knowledge', icon: BookOpen },
   { id: 'inspect' as const, label: 'Inspect', icon: Layers },
 ];
 
@@ -45,6 +48,7 @@ export const Header: React.FC<HeaderProps> = ({
   onResetToBase,
   paramStats,
   memoryFormatted = '1.8 MB',
+  knowledgeCount = 0,
 }) => (
   <header className="app-header">
     <div className="app-header__inner">
@@ -155,6 +159,8 @@ export const Header: React.FC<HeaderProps> = ({
           <span><strong>{defaultTokenizer.vocabSize.toLocaleString()}</strong> vocab</span>
           <i />
           <span><strong>{defaultTokenizer.bpeMergeCount}</strong> BPE</span>
+          <i />
+          <span><strong>{knowledgeCount}</strong> knowledge</span>
         </div>
       </nav>
     </div>

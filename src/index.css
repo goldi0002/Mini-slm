@@ -814,3 +814,34 @@ code, pre, .font-mono {
     transition-duration: .001ms !important;
   }
 }
+
+
+.chat-toolbar__knowledge {
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: .28rem .5rem;
+  border: 1px solid #c7d2fe;
+  border-radius: 999px;
+  color: #4338ca;
+  background: #f5f3ff;
+  font-size: 9px;
+  font-weight: 700;
+}
+
+.chat-knowledge-meta {
+  margin-top: .55rem;
+  padding-top: .45rem;
+  border-top: 1px solid #eef2ff;
+  color: #6366f1;
+  font-size: 9px;
+  line-height: 1.4;
+  font-weight: 700;
+}
+
+@media (max-width: 640px) {
+  .chat-toolbar__knowledge {
+    display: none;
+  }
+}
