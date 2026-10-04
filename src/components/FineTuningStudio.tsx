@@ -579,18 +579,18 @@ export const FineTuningStudio: React.FC<FineTuningStudioProps> = ({
   const regimeAdvisory = trainingRegimeAdvisory(hyperparams);
 
   return (
-    <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4 space-y-4">
+    <div className="max-w-7xl mx-auto w-full min-w-0 px-3 sm:px-6 lg:px-8 py-3 sm:py-4 space-y-3 sm:space-y-4">
       {/* Header Banner */}
       <div className="bg-white border border-slate-200 rounded-xl p-4 shadow-2xs flex flex-col sm:flex-row sm:flex-wrap sm:items-center sm:justify-between gap-3 min-w-0">
         <div>
-          <div className="flex items-start sm:items-center gap-2 min-w-0">
+          <div className="flex items-start sm:items-center gap-2 min-w-0 flex-1">
             <span className="p-1.5 shrink-0 bg-amber-50 text-amber-600 rounded-lg border border-amber-200">
               <TrendingDown className="w-5 h-5" />
             </span>
-            <h2 className="text-base font-bold text-slate-900 break-words">
+            <h2 className="text-sm sm:text-base font-bold text-slate-900 break-words">
               Conversational Fine-Tuning Studio
             </h2>
-            <span className="text-[11px] bg-emerald-50 text-emerald-700 px-2 py-0.5 rounded-md border border-emerald-200 font-medium flex items-center gap-1">
+            <span className="shrink-0 text-[10px] sm:text-[11px] bg-emerald-50 text-emerald-700 px-2 py-0.5 rounded-md border border-emerald-200 font-medium flex items-center gap-1">
               <HardDrive className="w-3 h-3" />
               {memoryStats.totalMemoryFormatted} RAM
             </span>
@@ -601,7 +601,7 @@ export const FineTuningStudio: React.FC<FineTuningStudioProps> = ({
         </div>
 
         {/* Action Controls */}
-        <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
+        <div className="grid grid-cols-2 sm:flex sm:flex-wrap items-stretch sm:items-center gap-2 w-full sm:w-auto">
           {trainingState.isTraining && !trainingState.isPaused ? (
             <button
               onClick={pauseTraining}
@@ -615,7 +615,7 @@ export const FineTuningStudio: React.FC<FineTuningStudioProps> = ({
             <button
               onClick={startTraining}
               id="start-training-btn"
-              className="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-lg text-xs font-semibold flex items-center gap-1.5 shadow-2xs transition-colors cursor-pointer"
+              className="w-full bg-indigo-600 hover:bg-indigo-700 text-white px-3 sm:px-4 py-2 rounded-lg text-xs font-semibold flex items-center gap-1.5 shadow-2xs transition-colors cursor-pointer"
             >
               <Play className="w-3.5 h-3.5" />
               <span>{trainingState.isPaused ? 'Resume Training' : 'Start Fine-Tuning'}</span>
@@ -626,7 +626,7 @@ export const FineTuningStudio: React.FC<FineTuningStudioProps> = ({
             <button
               onClick={stopTraining}
               id="stop-training-btn"
-              className="bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-2 rounded-lg text-xs font-medium transition-colors cursor-pointer"
+              className="w-full bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-2 rounded-lg text-xs font-medium transition-colors cursor-pointer"
             >
               Stop
             </button>
@@ -637,15 +637,15 @@ export const FineTuningStudio: React.FC<FineTuningStudioProps> = ({
             disabled={trainingState.isTraining}
             id="reset-studio-btn"
             title="Reset model to base pretrained checkpoint"
-            className="bg-white hover:bg-slate-50 border border-slate-200 text-slate-600 hover:text-rose-600 px-3 py-2 rounded-lg text-xs font-medium flex items-center gap-1 transition-colors disabled:opacity-50 cursor-pointer"
+            className="w-full bg-white hover:bg-slate-50 border border-slate-200 text-slate-600 hover:text-rose-600 px-3 py-2 rounded-lg text-xs font-medium flex items-center gap-1 transition-colors disabled:opacity-50 cursor-pointer"
           >
             <RotateCcw className="w-3.5 h-3.5" />
-            <span>Reset Weights</span>
+            <span className="truncate">Reset Weights</span>
           </button>
         </div>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start min-w-0">
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 sm:gap-4 items-start min-w-0">
         {/* Left Column: Dataset & Hyperparameters */}
         <div className="lg:col-span-4 space-y-4 min-w-0">
           {/* Dataset Scale Selector (Supports Big Datasets) */}
@@ -857,24 +857,24 @@ export const FineTuningStudio: React.FC<FineTuningStudioProps> = ({
             </div>
 
             {/* Quick Metrics Dashboard */}
-            <div className="grid grid-cols-2 xl:grid-cols-4 gap-2.5 text-center min-w-0">
+            <div className="grid grid-cols-2 xl:grid-cols-4 gap-2 text-center min-w-0">
               <div className="bg-slate-50 border border-slate-200 rounded-lg p-2.5">
                 <span className="text-[11px] text-slate-500 block">Current Loss</span>
-                <span className="text-base font-bold font-mono text-indigo-600">
+                <span className="text-sm sm:text-base font-bold font-mono text-indigo-600 break-all">
                   {trainingState.currentLoss ? trainingState.currentLoss.toFixed(4) : '--'}
                 </span>
               </div>
 
               <div className="bg-slate-50 border border-slate-200 rounded-lg p-2.5">
                 <span className="text-[11px] text-slate-500 block">Perplexity (PPL)</span>
-                <span className="text-base font-bold font-mono text-emerald-600">
+                <span className="text-sm sm:text-base font-bold font-mono text-emerald-600 break-all">
                   {trainingState.currentPerplexity ? trainingState.currentPerplexity.toFixed(1) : '--'}
                 </span>
               </div>
 
               <div className="bg-slate-50 border border-slate-200 rounded-lg p-2.5">
                 <span className="text-[11px] text-slate-500 block">Epoch</span>
-                <span className="text-base font-bold font-mono text-slate-800">
+                <span className="text-sm sm:text-base font-bold font-mono text-slate-800 break-all">
                   {trainingState.currentEpoch} / {hyperparams.epochs}
                 </span>
               </div>
@@ -886,7 +886,7 @@ export const FineTuningStudio: React.FC<FineTuningStudioProps> = ({
                 </span>
               </div>
 
-              <div className="col-span-2 xl:col-span-4 grid grid-cols-1 sm:grid-cols-3 gap-2">
+              <div className="col-span-2 xl:col-span-4 grid grid-cols-1 sm:grid-cols-3 gap-2 min-w-0">
                 <div className="rounded-lg border border-emerald-200 bg-emerald-50/70 p-2.5 text-left">
                   <span className="text-[11px] text-emerald-700 block">Target Loss</span>
                   <span className="text-base font-bold font-mono text-emerald-800">{TARGET_LOSS.toFixed(2)}</span>
@@ -903,14 +903,14 @@ export const FineTuningStudio: React.FC<FineTuningStudioProps> = ({
             </div>
 
             {/* SVG Loss Curve */}
-            <div className="bg-slate-900 rounded-xl p-3 relative overflow-hidden min-w-0">
+            <div className="bg-slate-900 rounded-xl p-2.5 sm:p-3 relative overflow-hidden min-w-0">
               <div className="grid grid-cols-2 sm:grid-cols-3 gap-1 text-[10px] sm:text-[11px] text-slate-400 mb-2 px-1">
                 <span>Top: {chartTop.toFixed(2)}</span>
                 <span className="font-mono text-indigo-400 text-center">Target: {TARGET_LOSS.toFixed(2)}</span>
                 <span className="text-right">Bottom: {chartBottom.toFixed(2)}</span>
               </div>
 
-              <div className="w-full h-44 flex items-center justify-center">
+              <div className="w-full h-36 sm:h-44 flex items-center justify-center">
                 {points.length > 1 ? (
                   <svg
                     viewBox={`0 0 ${chartWidth} ${chartHeight}`}
@@ -971,10 +971,10 @@ export const FineTuningStudio: React.FC<FineTuningStudioProps> = ({
 
           {/* Epoch Evaluation Completions */}
           <div className="bg-white border border-slate-200 rounded-xl p-4 shadow-2xs space-y-3">
-            <div className="flex items-center justify-between pb-2 border-b border-slate-100">
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 pb-2 border-b border-slate-100">
               <h3 className="text-xs font-bold text-slate-900 uppercase tracking-wider flex items-center gap-1.5">
                 <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
-                <span>Conversational Progress per Epoch</span>
+                <span className="break-words">Conversational Progress per Epoch</span>
               </h3>
               <button
                 onClick={onNavigateToChat}
@@ -994,7 +994,7 @@ export const FineTuningStudio: React.FC<FineTuningStudioProps> = ({
                   >
                     <div className="flex items-center justify-between text-slate-500 text-[11px]">
                       <span className="font-semibold text-slate-700">Epoch {out.epoch}</span>
-                      <span className="font-mono text-[10px]">Prompt: "{out.prompt}"</span>
+                      <span className="font-mono text-[10px] break-words text-right sm:max-w-[70%]">Prompt: "{out.prompt}"</span>
                     </div>
                     <p className="text-indigo-950 font-medium pl-2 border-l-2 border-indigo-400">
                       {out.response}
@@ -1011,7 +1011,7 @@ export const FineTuningStudio: React.FC<FineTuningStudioProps> = ({
 
           {/* Trained Data Verification & Evaluation Suite */}
           <div className="bg-white border border-slate-200 rounded-xl p-4 sm:p-5 shadow-2xs space-y-4">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-3 border-b border-slate-100">
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 pb-3 border-b border-slate-100 min-w-0">
               <div>
                 <h3 className="text-xs font-bold text-slate-900 uppercase tracking-wider flex items-center gap-1.5">
                   <Activity className="w-3.5 h-3.5 text-indigo-600" />
@@ -1178,7 +1178,7 @@ export const FineTuningStudio: React.FC<FineTuningStudioProps> = ({
               <span className="text-[11px] font-bold text-slate-700 uppercase tracking-wider block">
                 Quick Single-Prompt Tester
               </span>
-              <form onSubmit={handleTestSinglePrompt} className="flex gap-2">
+              <form onSubmit={handleTestSinglePrompt} className="flex flex-col sm:flex-row gap-2 min-w-0">
                 <input
                   type="text"
                   value={customTestPrompt}
@@ -1189,7 +1189,7 @@ export const FineTuningStudio: React.FC<FineTuningStudioProps> = ({
                 <button
                   type="submit"
                   disabled={!customTestPrompt.trim() || isTestingPrompt}
-                  className="px-3 py-1.5 bg-slate-900 hover:bg-slate-800 text-white rounded-lg text-xs font-semibold flex items-center gap-1 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                  className="w-full sm:w-auto px-3 py-1.5 bg-slate-900 hover:bg-slate-800 text-white rounded-lg text-xs font-semibold flex items-center gap-1 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   <Send className="w-3 h-3" />
                   <span>Test</span>
@@ -1199,7 +1199,7 @@ export const FineTuningStudio: React.FC<FineTuningStudioProps> = ({
               {customTestOutput && (
                 <div className="p-3 bg-indigo-50/50 rounded-lg border border-indigo-100 text-xs space-y-1">
                   <div className="flex items-center justify-between text-[10px] text-slate-500">
-                    <span className="font-semibold text-slate-700">Q: "{customTestOutput.prompt}"</span>
+                    <span className="font-semibold text-slate-700 break-words min-w-0">Q: "{customTestOutput.prompt}"</span>
                     <span>{customTestOutput.latencyMs}ms ({customTestOutput.tokensCount} tokens)</span>
                   </div>
                   <p className="text-indigo-950 font-medium pl-2 border-l-2 border-indigo-400">
