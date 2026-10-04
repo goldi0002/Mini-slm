@@ -1483,7 +1483,8 @@ export class SmallLanguageModel {
     seqLen: number,
     learningRate: number,
     weightDecay: number,
-    targetCount: number
+    targetCount: number,
+    lossStartIndex = 0
   ): void {
     const cache = this.activationCache;
     if (!cache) return;
