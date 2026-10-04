@@ -45,11 +45,23 @@ export interface EvaluationSummary {
   avgOverlap: number;
   avgLoss: number;
   results: EvaluationResult[];
+  /** Turns held out of training and the cross-entropy the model reaches on them. */
+  heldOutTurns: number;
+  heldOutLoss: number;
+  /** Share of generation the network earned on held-out text (0..1). */
+  neuralInfluence: number;
+  neuralPerplexity: number;
+  memoryPerplexity: number;
 }
 import { SmallLanguageModel } from '../slm/transformer';
 import { generateExpandedChatCorpus } from '../slm/datasets';
 import { SPECIAL_TOKENS } from '../slm/tokenizer';
 import { ConversationTurn } from '../types';
+
+/** The exact training text of a turn, shared by training, scoring and calibration. */
+function formatTurn(turn: ConversationTurn): string {
+  return `${SPECIAL_TOKENS.USER} ${turn.user} ${SPECIAL_TOKENS.NEWLINE}${SPECIAL_TOKENS.ASSISTANT} ${turn.assistant}`;
+}
 
 /**
  * Score one dataset turn against the model: the generated reply, its word
@@ -120,11 +132,11 @@ export function evaluateTurn(
  * retrain — the point where the extra epochs stop paying for themselves.
  *
  * The threshold comes from measurement, not taste: `scripts/diag_script.ts`
- * section 12 scores both adaptation modes on sentences held out of training,
- * under several weight initialisations. Both modes cut held-out loss by more
- * than a nat, but they land level with each other, while a full retrain updates
- * every weight in the network instead of a rank-r adapter. So past a short
- * warm-in, the epochs are spent for no measured gain.
+ * section 12 scores both adaptation modes on sentences held out of training.
+ * A full retrain does reach lower held-out loss than the adapters (it updates
+ * every weight, not a rank-r update inside the attention projections), but the
+ * gap saturates after a few epochs while each additional epoch costs a full
+ * backprop pass over the entire network and refits the turns already seen.
  */
 export const FULL_MODE_ADVISORY_EPOCHS = 4;
 
@@ -137,7 +149,7 @@ export const FULL_MODE_ADVISORY_EPOCHS = 4;
  */
 export function trainingRegimeAdvisory(hyperparams: TrainingHyperparams): string | null {
   if (!hyperparams.loraMode && hyperparams.epochs >= FULL_MODE_ADVISORY_EPOCHS) {
-    return `Full retraining for ${hyperparams.epochs} epochs rewrites every weight in the network, but measured the same held-out loss as the LoRA adapter — the extra epochs mostly refit the turns it has already seen. Keep a full retrain short (1–3 epochs), or use LoRA.`;
+    return `Full retraining for ${hyperparams.epochs} epochs backpropagates through every weight in the network. It measured a lower held-out loss than the LoRA adapter, but most of that gain arrives in the first few epochs — later epochs cost a full backprop pass each and mostly refit turns the model has already seen. Keep a full retrain short (1–3 epochs), or switch to LoRA.`;
   }
   return null;
 }
@@ -183,6 +195,7 @@ export const FineTuningStudio: React.FC<FineTuningStudioProps> = ({
     lossHistory: [],
     currentLoss: 0,
     currentPerplexity: 0,
+    currentBlendedLoss: 0,
     sampleOutputs: [],
   });
 
@@ -215,6 +228,24 @@ export const FineTuningStudio: React.FC<FineTuningStudioProps> = ({
     return generateExpandedChatCorpus(selectedPreset, 100);
   }, [selectedPreset, datasetScale]);
 
+  /**
+   * Held-out split.
+   *
+   * Every fourth turn is withheld from training and only used to score the
+   * model. In-sample loss falls whether or not anything generalisable was
+   * learned, so a held-out number is the only honest answer to "did it learn
+   * English?" (ISS-20/ISS-22). The split is positional and deterministic, so
+   * the same dataset always produces the same train/held-out division.
+   */
+  const heldOutTurns = React.useMemo(
+    () => activeTurns.filter((_, i) => i % 4 === 3),
+    [activeTurns]
+  );
+  const trainTurns = React.useMemo(
+    () => activeTurns.filter((_, i) => i % 4 !== 3),
+    [activeTurns]
+  );
+
   const evalPrompt = selectedPreset.turns[0]?.user
     ? model.tokenizer.formatConversationPrompt(selectedPreset.turns[0].user)
     : 'User: hello who are you\nAssistant: ';
@@ -233,7 +264,8 @@ export const FineTuningStudio: React.FC<FineTuningStudioProps> = ({
     isTrainingRef.current = true;
     isPausedRef.current = false;
 
-    const dataset = activeTurns;
+    // Train on the split only: the held-out turns are reserved for scoring.
+    const dataset = trainTurns.length > 0 ? trainTurns : activeTurns;
     const totalEpochs = hyperparams.epochs;
     const totalSteps = totalEpochs * dataset.length;
 
@@ -247,6 +279,7 @@ export const FineTuningStudio: React.FC<FineTuningStudioProps> = ({
       lossHistory: [],
       currentLoss: 0,
       currentPerplexity: 0,
+      currentBlendedLoss: 0,
       sampleOutputs: [],
     });
 
@@ -270,19 +303,24 @@ export const FineTuningStudio: React.FC<FineTuningStudioProps> = ({
 
         // Note: EOS is appended by the tokenizer (addEos) — do not also embed
         // the '<eos>' string here or sequences would end with a double EOS.
-        const formattedText = `${SPECIAL_TOKENS.USER} ${turn.user} ${SPECIAL_TOKENS.NEWLINE}${SPECIAL_TOKENS.ASSISTANT} ${turn.assistant}`;
+        const formattedText = formatTurn(turn);
         const tokens = model.tokenizer.encode(formattedText, true, true);
 
         // Learning rate decay over epochs
         const currentLr =
           hyperparams.learningRate * (1.0 - (epoch - 1) / Math.max(1, totalEpochs * 1.2));
 
-        const { loss, perplexity } = model.trainStep(
+        const { loss, perplexity, neuralLoss, blendedLoss } = model.trainStep(
           tokens,
           currentLr,
           hyperparams.loraMode,
           hyperparams.weightDecay
         );
+
+        // Record the number the optimizer actually moves, plus the blend-epoch
+        // ghost loss so the curve labels stay honest.
+        const epochLossToRecord =
+          hyperparams.loraMode && hyperparams.learningRate > 0 ? neuralLoss : loss;
 
         epochLossSum += loss;
         stepCount++;
@@ -305,7 +343,8 @@ export const FineTuningStudio: React.FC<FineTuningStudioProps> = ({
             ...prev,
             currentEpoch: epoch,
             currentStep: stepCount,
-            currentLoss: loss,
+            currentLoss: epochLossToRecord,
+            currentBlendedLoss: blendedLoss ?? epochLossToRecord,
             currentPerplexity: perplexity,
             lossHistory: [...lossHistory],
           }));
@@ -352,6 +391,7 @@ export const FineTuningStudio: React.FC<FineTuningStudioProps> = ({
       ...prev,
       isTraining: false,
       isPaused: false,
+      currentBlendedLoss: 0,
     }));
 
     if (completedSuccessfully) {
@@ -425,6 +465,26 @@ export const FineTuningStudio: React.FC<FineTuningStudioProps> = ({
         });
       }
 
+      // Held-out scoring: turns the trainer never saw, under the active
+      // adaptation mode. This is the number that answers "did it learn
+      // English?" — in-sample loss falls whether or not anything generalisable
+      // was learned (ISS-20/ISS-22).
+      const scoringTurns = heldOutTurns.length > 0 ? heldOutTurns : turns;
+      let heldOutLoss = 0;
+      for (const turn of scoringTurns) {
+        heldOutLoss += evaluateTurn(model, turn, hyperparams.loraMode).loss;
+      }
+      heldOutLoss /= scoringTurns.length;
+
+      // Fit the neural/memory blend on those same unseen turns. A network that
+      // has learned something earns a larger share of the sampling mass here;
+      // the fix is measured, not assumed (ISS-16).
+      const calibration = model.calibrateNeuralMix(
+        scoringTurns.map(formatTurn),
+        undefined,
+        hyperparams.loraMode
+      );
+
       setEvalState({
         isEvaluating: false,
         summary: {
@@ -433,6 +493,11 @@ export const FineTuningStudio: React.FC<FineTuningStudioProps> = ({
           avgOverlap: parseFloat((totalOverlap / turns.length).toFixed(1)),
           avgLoss: parseFloat((totalLoss / turns.length).toFixed(3)),
           results,
+          heldOutTurns: scoringTurns.length,
+          heldOutLoss: parseFloat(heldOutLoss.toFixed(3)),
+          neuralInfluence: parseFloat(calibration.mix.toFixed(3)),
+          neuralPerplexity: parseFloat(calibration.neuralPerplexity.toFixed(1)),
+          memoryPerplexity: parseFloat(calibration.memoryPerplexity.toFixed(1)),
         },
       });
     } catch (err) {
@@ -945,7 +1010,7 @@ export const FineTuningStudio: React.FC<FineTuningStudioProps> = ({
             {/* Scorecard Strip */}
             {evalState.summary ? (
               <div className="space-y-4">
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+                <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2.5">
                   <div className="bg-slate-50 border border-slate-200 rounded-lg p-3">
                     <span className="text-[11px] font-medium text-slate-500 block">Avg Word Match</span>
                     <span className="text-lg font-bold text-slate-900">
@@ -966,6 +1031,28 @@ export const FineTuningStudio: React.FC<FineTuningStudioProps> = ({
                     <span className="text-lg font-bold text-slate-900 font-mono">
                       {evalState.summary.avgLoss}
                     </span>
+                  </div>
+                  <div className="bg-amber-50/60 border border-amber-200 rounded-lg p-3">
+                    <span className="text-[11px] font-medium text-amber-700 block">Held-Out Loss</span>
+                    <div className="flex items-baseline gap-1">
+                      <span className="text-lg font-bold text-slate-900 font-mono">
+                        {evalState.summary.heldOutLoss}
+                      </span>
+                      <span className="text-[10px] text-amber-700">
+                        {evalState.summary.heldOutTurns} unseen
+                      </span>
+                    </div>
+                  </div>
+                  <div className="bg-indigo-50/60 border border-indigo-200 rounded-lg p-3">
+                    <span className="text-[11px] font-medium text-indigo-700 block">Neural Influence</span>
+                    <div className="flex items-baseline gap-1">
+                      <span className="text-lg font-bold text-slate-900 font-mono">
+                        {Math.round(evalState.summary.neuralInfluence * 100)}%
+                      </span>
+                      <span className="text-[10px] text-indigo-700">
+                        ppl {evalState.summary.neuralPerplexity} vs {evalState.summary.memoryPerplexity}
+                      </span>
+                    </div>
                   </div>
                   <div className="bg-slate-50 border border-slate-200 rounded-lg p-3">
                     <span className="text-[11px] font-medium text-slate-500 block">Model Status</span>

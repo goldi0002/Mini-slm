@@ -68,10 +68,11 @@ export default function App() {
   /**
    * Apply a dataset edit, teaching the tokenizer any words it has not seen yet.
    *
-   * New words must be learned *before* a model is built: the embedding table and
-   * LM head are sized from the vocabulary at construction time, so a token with
-   * no output row could never be generated. Growing the vocabulary therefore
-   * rebuilds the model from its base checkpoint.
+   * A new word needs an embedding row and an output row, so the model grows in
+   * place (`resizeVocabulary`) instead of being rebuilt. Rebuilding was how this
+   * used to work, and it threw away every trained weight and the base snapshot
+   * just because one imported turn contained an unseen word — which is exactly
+   * the moment a user is most likely to add data (ISS-21).
    */
   const handleDatasetsChange = (next: DatasetPreset[]) => {
     setDatasets(next);
@@ -80,11 +81,10 @@ export default function App() {
       next.flatMap((d) => d.turns.flatMap((t) => [t.user, t.assistant]))
     );
 
-    if (learned > 0) {
-      const updatedConfig = { ...selectedModelConfig, vocabSize: defaultTokenizer.vocabSize };
-      setSelectedModelConfig(updatedConfig);
-      setModel(initializePretrainedModel(updatedConfig));
-      syncResetState();
+    if (learned > 0 && model.resizeVocabulary(defaultTokenizer.vocabSize)) {
+      // The weights were preserved, so the fine-tuned state stays valid; only
+      // the configuration readout needs to reflect the wider vocabulary.
+      setSelectedModelConfig((prev) => ({ ...prev, vocabSize: model.config.vocabSize }));
     }
   };
 

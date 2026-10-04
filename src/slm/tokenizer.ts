@@ -25,7 +25,14 @@
  * has never seen instead of choking on them.
  */
 
-import { BASE_CORPUS, BPE_SEED_WORDS } from './corpus';
+import { BASE_CORPUS, BPE_SEED_WORDS, ENGLISH_LEARNING_CORPUS } from './corpus';
+
+/**
+ * Every text the tokenizer learns its vocabulary and merges from: the dialogue
+ * seed (for fluent conversation) and the plain-English learning corpus (so the
+ * network can read and produce real sentences, not just dialogue fragments).
+ */
+const VOCABULARY_SOURCES: string[] = [...BASE_CORPUS, ...ENGLISH_LEARNING_CORPUS];
 
 // Special control tokens
 export const SPECIAL_TOKENS = {
@@ -182,15 +189,16 @@ export class Tokenizer {
     // fluency never depends on subword composition and merge results that
     // equal a corpus word reuse the existing id instead of duplicating it.
     const corpusWordRegex = /[a-zA-Z0-9]+(?:'[a-zA-Z]+)?/g;
-    for (const text of BASE_CORPUS) {
+    for (const text of VOCABULARY_SOURCES) {
       for (const match of text.matchAll(corpusWordRegex)) {
         const word = match[0].toLowerCase();
         if (/^[a-z0-9]+(?:'[a-z]+)?$/.test(word)) this.addToken(word);
       }
     }
 
-    // Learn BPE merges from the seed corpus plus the affix-rich seed words.
-    this.learnBpeMerges([...BASE_CORPUS, ...BPE_SEED_WORDS]);
+    // Learn BPE merges from every vocabulary source plus the affix-rich seed
+    // words, so an unseen word composes from pieces this corpus has taught.
+    this.learnBpeMerges([...VOCABULARY_SOURCES, ...BPE_SEED_WORDS]);
 
     this.vocabSize = this.nextId;
   }

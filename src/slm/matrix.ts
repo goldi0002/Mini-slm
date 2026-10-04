@@ -133,6 +133,44 @@ export function layerNormBackward(
 }
 
 /**
+ * Parameter side of the layerNorm backward pass: accumulates the gradient
+ * w.r.t. gamma and beta for one row.
+ *
+ * `layerNormBackward` answers "how does the loss change with the input?"; a
+ * trainable LayerNorm also needs "how does it change with gamma and beta?",
+ * which is `dGamma += dy * xhat` and `dBeta += dy`.
+ */
+export function layerNormBackwardParam(
+  x: Float32Array,
+  xOffset: number,
+  dy: Float32Array,
+  dyOffset: number,
+  dGamma: Float32Array,
+  dBeta: Float32Array,
+  dim: number,
+  eps = 1e-5
+): void {
+  let mean = 0;
+  for (let i = 0; i < dim; i++) mean += x[xOffset + i];
+  mean /= dim;
+
+  let variance = 0;
+  for (let i = 0; i < dim; i++) {
+    const diff = x[xOffset + i] - mean;
+    variance += diff * diff;
+  }
+  variance /= dim;
+  const invStd = 1.0 / Math.sqrt(variance + eps);
+
+  for (let i = 0; i < dim; i++) {
+    const xhat = (x[xOffset + i] - mean) * invStd;
+    const g = dy[dyOffset + i];
+    dGamma[i] += g * xhat;
+    dBeta[i] += g;
+  }
+}
+
+/**
  * Numerically stable Softmax with temperature
  */
 export function softmax(logits: Float32Array, out: Float32Array, temp = 1.0): void {
