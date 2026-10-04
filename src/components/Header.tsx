@@ -43,15 +43,15 @@ export const Header: React.FC<HeaderProps> = ({
   return (
     <header className="bg-white border-b border-slate-200 sticky top-0 z-30 shadow-xs">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-        <div className="flex items-center justify-between h-16">
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 py-2 sm:py-0 sm:h-16 min-w-0">
           
           {/* Logo and Identity */}
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-3 min-w-0">
             <div className="w-10 h-10 rounded-xl bg-indigo-600 text-white flex items-center justify-center shadow-sm">
               <Bot className="w-5 h-5" />
             </div>
             <div>
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2 min-w-0">
                 <h1 className="text-base font-bold text-slate-900 leading-none">
                   Conversational SLM
                 </h1>
@@ -76,8 +76,8 @@ export const Header: React.FC<HeaderProps> = ({
           </div>
 
           {/* Model Selector and Reset */}
-          <div className="flex items-center gap-3">
-            <div className="relative">
+          <div className="flex flex-wrap items-center justify-end gap-2 w-full sm:w-auto">
+            <div className="relative max-w-full">
               <select
                 id="model-selector"
                 value={currentModel.id}
@@ -86,7 +86,7 @@ export const Header: React.FC<HeaderProps> = ({
                   if (m) onSelectModel(m);
                 }}
                 aria-label="Select Small Language Model"
-                className="text-xs font-medium bg-slate-50 hover:bg-slate-100 border border-slate-200 text-slate-800 rounded-lg px-3 py-1.5 focus:outline-hidden focus:ring-2 focus:ring-indigo-500 cursor-pointer pr-8"
+                className="w-full sm:w-auto max-w-full text-xs font-medium bg-slate-50 hover:bg-slate-100 border border-slate-200 text-slate-800 rounded-lg px-3 py-1.5 focus:outline-hidden focus:ring-2 focus:ring-indigo-500 cursor-pointer pr-8"
               >
                 {models.map((mod) => (
                   <option key={mod.id} value={mod.id}>
@@ -133,7 +133,7 @@ export const Header: React.FC<HeaderProps> = ({
         </div>
 
         {/* Navigation Tabs */}
-        <div className="flex items-center gap-1 border-t border-slate-100 pt-1 pb-2 overflow-x-auto">
+        <div className="flex items-center gap-1 border-t border-slate-100 pt-1 pb-2 overflow-x-auto min-w-0 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
           <button
             onClick={() => setActiveTab('chat')}
             id="nav-chat-tab"

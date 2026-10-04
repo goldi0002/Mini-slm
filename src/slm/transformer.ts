@@ -281,6 +281,12 @@ export class SmallLanguageModel {
   private dLora_vB!: Float32Array;
   private adapterRow!: Float32Array;
 
+  // Momentum buffers are kept per trainable tensor. A single velocity buffer
+  // gives SGD the history it needs to cross the shallow plateaus visible in
+  // browser fine-tuning without the 2x extra memory cost of full Adam.
+  private optimizerVelocity = new WeakMap<Float32Array, Float32Array>();
+  private optimizerVelocityBuffers: Float32Array[] = [];
+
   // Gradient buffers for the full backpropagation path (see backwardFull).
   private weightGrads: WeightGradients | null = null;
 
@@ -612,6 +618,11 @@ export class SmallLanguageModel {
     if (this.baseMemorySnapshot) {
       this.memory.restore(this.baseMemorySnapshot);
     }
+
+    // Reset optimizer history too: momentum from a previous fine-tune must not
+    // leak into a fresh run after the user restores the base checkpoint.
+    this.optimizerVelocity = new WeakMap<Float32Array, Float32Array>();
+    this.optimizerVelocityBuffers = [];
 
     // The weights are back at the base checkpoint, so no adaptation is left.
     this.fullFineTuneApplied = false;
@@ -973,6 +984,9 @@ export class SmallLanguageModel {
         this.dLora_vB.length +
         this.adapterRow.length;
     }
+    // Momentum keeps one velocity buffer per trainable tensor.
+    for (const velocity of this.optimizerVelocityBuffers) floats += velocity.length;
+
     // Full backpropagation holds one gradient buffer per base weight.
     const grads = this.weightGrads;
     if (grads) {
@@ -1000,15 +1014,23 @@ export class SmallLanguageModel {
     weightDecay: number
   ): void {
     const invCount = targetCount > 0 ? 1 / targetCount : 0;
-    // The adapters start at zero (B is zero-initialized), so at the start of a
-    // run the whole gradient has to grow them from nothing while the pretrained
-    // body already sits at a good solution. Measured on held-out sentences, the
-    // studio's default learning rate moves the adapters too slowly to fit a
-    // dataset in a handful of epochs; the multiplier is what makes the default
-    // LoRA run actually learn, and it is verified in scripts/test_fixes.ts.
     const lr = learningRate * ADAPTER_LR_MULTIPLIER;
+    const beta = 0.9;
+    let velocity = this.optimizerVelocity.get(param);
+    if (!velocity) {
+      velocity = new Float32Array(param.length);
+      this.optimizerVelocity.set(param, velocity);
+      this.optimizerVelocityBuffers.push(velocity);
+    }
+
+    // Momentum SGD: average the sequence gradient first, then keep 90% of the
+    // previous direction. This is materially faster on the tiny, noisy
+    // per-turn gradients produced by browser fine-tuning while retaining a
+    // constant one-buffer memory overhead.
     for (let i = 0; i < param.length; i++) {
-      param[i] -= lr * (grad[i] * invCount + weightDecay * param[i]);
+      const g = grad[i] * invCount;
+      velocity[i] = beta * velocity[i] + (1 - beta) * g;
+      param[i] -= lr * (velocity[i] + weightDecay * param[i]);
     }
   }
 
@@ -1139,8 +1161,17 @@ export class SmallLanguageModel {
     weightDecay: number,
     clipScale: number
   ): void {
+    const beta = 0.9;
+    let velocity = this.optimizerVelocity.get(param);
+    if (!velocity) {
+      velocity = new Float32Array(param.length);
+      this.optimizerVelocity.set(param, velocity);
+      this.optimizerVelocityBuffers.push(velocity);
+    }
     for (let i = 0; i < param.length; i++) {
-      param[i] -= learningRate * (grad[i] * invCount * clipScale + weightDecay * param[i]);
+      const g = grad[i] * invCount * clipScale;
+      velocity[i] = beta * velocity[i] + (1 - beta) * g;
+      param[i] -= learningRate * (velocity[i] + weightDecay * param[i]);
     }
   }
 
@@ -1164,7 +1195,8 @@ export class SmallLanguageModel {
     seqLen: number,
     learningRate: number,
     weightDecay: number,
-    targetCount: number
+    targetCount: number,
+    lossStartIndex = 0
   ): void {
     const cache = this.activationCache;
     if (!cache) return;
@@ -1183,7 +1215,7 @@ export class SmallLanguageModel {
     //    gradient from the final LayerNorm activations and push the gradient
     //    into that LayerNorm's output.
     this.gNorm.fill(0);
-    for (let i = 0; i < seqLen - 1; i++) {
+    for (let i = lossStartIndex; i < seqLen - 1; i++) {
       let targetToken = tokens[i + 1];
       if (targetToken < 0 || targetToken >= vocabSize || !Number.isFinite(targetToken)) {
         targetToken = UNK_ID;
@@ -1458,7 +1490,8 @@ export class SmallLanguageModel {
     seqLen: number,
     learningRate: number,
     weightDecay: number,
-    targetCount: number
+    targetCount: number,
+    lossStartIndex = 0
   ): void {
     const cache = this.activationCache;
     if (!cache) return;
@@ -1948,7 +1981,13 @@ export class SmallLanguageModel {
     // the frozen body into the adapters, a full retrain through every weight.
     const loraTraining = loraMode && loraRank > 0;
 
-    // Forward pass, retaining the activations both backward passes need.
+    // Conversational fine-tuning should optimize the assistant response, not
+    // spend most of its capacity relearning the user's prompt and control
+    // tokens. Warm-up/plain-language sequences have no ASSISTANT marker and
+    // therefore keep the original full-sequence objective.
+    const assistantIdx = seqTokens.lastIndexOf(ASSISTANT_ID);
+    const lossStartIndex = assistantIdx >= 0 ? assistantIdx + 1 : 0;
+     // Forward pass, retaining the activations both backward passes need.
     const { logits } = this.forward(seqTokens, loraMode, true);
 
     // A full retrain leaves the LoRA adapters at zero, so record the adaptation
@@ -1964,7 +2003,7 @@ export class SmallLanguageModel {
     const neuralProbs = this.scratchNeuralProbs;
     const mixed = this.scratchBlendedProbs;
     const mix = this.neuralMix;
-    for (let i = 0; i < seqLen - 1; i++) {
+    for (let i = lossStartIndex; i < seqLen - 1; i++) {
       let targetToken = seqTokens[i + 1];
       if (targetToken < 0 || targetToken >= vocabSize || !Number.isFinite(targetToken)) {
         targetToken = UNK_ID;
@@ -1994,9 +2033,9 @@ export class SmallLanguageModel {
     // weight in the network.
     if (targetCount > 0) {
       if (loraTraining) {
-        this.backwardLora(seqTokens, seqLen, learningRate, weightDecay, targetCount);
+        this.backwardLora(seqTokens, seqLen, learningRate, weightDecay, targetCount, lossStartIndex);
       } else {
-        this.backwardFull(seqTokens, seqLen, learningRate, weightDecay, targetCount);
+        this.backwardFull(seqTokens, seqLen, learningRate, weightDecay, targetCount, lossStartIndex);
       }
     }
 
