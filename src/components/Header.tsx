@@ -8,7 +8,7 @@ import {
   Bot,
   Database,
   HardDrive,
-  Layers3,
+  Layers,
   RotateCcw,
   Sparkles,
   Flame,
@@ -33,7 +33,7 @@ const navItems = [
   { id: 'chat' as const, label: 'Chat', icon: Bot },
   { id: 'train' as const, label: 'Fine-tune', icon: Flame },
   { id: 'datasets' as const, label: 'Datasets', icon: Database },
-  { id: 'inspect' as const, label: 'Inspect', icon: Layers3 },
+  { id: 'inspect' as const, label: 'Inspect', icon: Layers },
 ];
 
 export const Header: React.FC<HeaderProps> = ({
@@ -49,7 +49,7 @@ export const Header: React.FC<HeaderProps> = ({
 }) => (
   <header className="sticky top-0 z-30 border-b border-slate-200/80 bg-white/90 backdrop-blur-xl">
     <div className="mx-auto w-full max-w-[1180px] px-4 sm:px-6 lg:px-8">
-      <div className="flex min-h-[68px] items-center justify-between gap-4 py-3">
+      <div className="flex min-h-[68px] flex-wrap items-center justify-between gap-3 py-3">
         <div className="flex min-w-0 items-center gap-3">
           <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-[13px] bg-slate-950 text-white shadow-sm">
             <Bot className="h-5 w-5" strokeWidth={2.1} />
@@ -79,7 +79,7 @@ export const Header: React.FC<HeaderProps> = ({
           </div>
         </div>
 
-        <div className="flex shrink-0 items-center gap-2">
+        <div className="flex w-full shrink-0 items-center justify-end gap-2 sm:w-auto">
           <div className="hidden items-center gap-1.5 rounded-xl border border-slate-200 bg-slate-50 px-2.5 py-2 text-[11px] text-slate-600 lg:flex">
             <HardDrive className="h-3.5 w-3.5 text-slate-400" />
             <span className="font-medium text-slate-700">{memoryFormatted}</span>
@@ -95,7 +95,7 @@ export const Header: React.FC<HeaderProps> = ({
               if (model) onSelectModel(model);
             }}
             aria-label="Select Small Language Model"
-            className="max-w-[170px] rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-800 shadow-sm transition hover:border-slate-300 hover:bg-slate-50 focus:outline-none"
+            className="min-w-0 max-w-[170px] flex-1 rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-800 shadow-sm transition hover:border-slate-300 hover:bg-slate-50 focus:outline-none"
           >
             {models.map((model) => (
               <option key={model.id} value={model.id}>{model.name}</option>
@@ -157,3 +157,4 @@ export const Header: React.FC<HeaderProps> = ({
       </div>
     </div>
   </header>
+);
