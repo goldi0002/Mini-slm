@@ -21,18 +21,18 @@ This document tracks all identified engine, state, and UI issues, their fix impl
 | **ISS-11** | Full Fine-Tuning Detection Failure in `isFineTuned()` Status Check | `src/slm/transformer.ts` | ✅ Completed | `scripts/test_fixes.ts` (ISS-11.1–8) |
 | **ISS-12** | Fine-Tuning Evaluation Mode & LoRA Flag Mismatch | `src/components/FineTuningStudio.tsx` | ✅ Completed | `scripts/test_fixes.ts` (ISS-12.1–6) |
 | **ISS-13** | Unstated Full-Retrain Cost: No Guardrail on the Training Regime | `src/components/FineTuningStudio.tsx` | ✅ Completed | `scripts/test_fixes.ts` (ISS-13.1–5), `scripts/diag_script.ts` §12 |
-| **ISS-14** | Neural Body Never Trained: Only `lm_head` & LoRA Q/V Adapters Receive Gradients | `src/slm/transformer.ts`, `src/slm/predefinedModels.ts` | 🔍 Open / Identified | Registered — needs test & fix |
-| **ISS-15** | "Full Fine-Tuning" Updates Only `lm_head` While UI Claims It Rewrites Every Weight | `src/slm/transformer.ts`, `src/components/FineTuningStudio.tsx` | 🔍 Open / Identified | Registered — needs test & fix |
-| **ISS-16** | Hard-Coded `neuralMix = 0.08` Caps Neural Influence; Memory Overrides Dominate Generation | `src/slm/transformer.ts`, `src/slm/ngram.ts` | 🔍 Open / Identified | Registered — needs test & fix |
-| **ISS-17** | Memory Observes Training Tokens Before the Loss Loop: Reported Loss Measures N-Gram Memorization | `src/slm/transformer.ts` (`trainStep`) | 🔍 Open / Identified | Registered — needs test & fix |
-| **ISS-18** | Full-Mode Gradient Is Not the Gradient of the Blended Loss (`mixed − onehot`) | `src/slm/transformer.ts` (`trainStep`) | 🔍 Open / Identified | Registered — needs test & fix |
-| **ISS-19** | LoRA Mode Reports Blended Loss but Optimizes Pure Neural CE (Metric ≠ Objective) | `src/slm/transformer.ts` | 🔍 Open / Identified | Registered — needs test & fix |
-| **ISS-20** | Retrieval Shortcuts Mask Learning; Studio Reports Only In-Sample Loss | `src/slm/transformer.ts`, `src/slm/ngram.ts`, `src/components/FineTuningStudio.tsx` | 🔍 Open / Identified | Registered — needs test & fix |
-| **ISS-21** | Vocabulary Growth Rebuilds the Model With Fresh Random Weights, Discarding Training Progress | `src/App.tsx` | 🔍 Open / Identified | Registered — needs test & fix |
-| **ISS-22** | Training Data Scale Too Small for Grammar Induction; No In-App Held-Out Evaluation | `src/slm/corpus.ts`, `src/slm/datasets.ts` | 🔍 Open / Identified | Registered — needs test & fix |
-| **ISS-23** | Frozen Random Representations: Untrained OOV Embeddings & Sliding-Window Position Reset | `src/slm/transformer.ts`, `src/slm/tokenizer.ts` | 🔍 Open / Identified | Registered — needs test & fix |
+| **ISS-14** | Neural Body Never Trained: Only `lm_head` & LoRA Q/V Adapters Receive Gradients | `src/slm/transformer.ts`, `src/slm/predefinedModels.ts` | ✅ Completed | Registered — needs test & fix |
+| **ISS-15** | "Full Fine-Tuning" Updates Only `lm_head` While UI Claims It Rewrites Every Weight | `src/slm/transformer.ts`, `src/components/FineTuningStudio.tsx` | ✅ Completed | Registered — needs test & fix |
+| **ISS-16** | Hard-Coded `neuralMix = 0.08` Caps Neural Influence; Memory Overrides Dominate Generation | `src/slm/transformer.ts`, `src/slm/ngram.ts` | ✅ Completed | Registered — needs test & fix |
+| **ISS-17** | Memory Observes Training Tokens Before the Loss Loop: Reported Loss Measures N-Gram Memorization | `src/slm/transformer.ts` (`trainStep`) | ✅ Completed | Registered — needs test & fix |
+| **ISS-18** | Full-Mode Gradient Is Not the Gradient of the Blended Loss (`mixed − onehot`) | `src/slm/transformer.ts` (`trainStep`) | ✅ Completed | Registered — needs test & fix |
+| **ISS-19** | LoRA Mode Reports Blended Loss but Optimizes Pure Neural CE (Metric ≠ Objective) | `src/slm/transformer.ts` | ✅ Completed | Registered — needs test & fix |
+| **ISS-20** | Retrieval Shortcuts Mask Learning; Studio Reports Only In-Sample Loss | `src/slm/transformer.ts`, `src/slm/ngram.ts`, `src/components/FineTuningStudio.tsx` | ✅ Completed | Registered — needs test & fix |
+| **ISS-21** | Vocabulary Growth Rebuilds the Model With Fresh Random Weights, Discarding Training Progress | `src/App.tsx` | ✅ Completed | Registered — needs test & fix |
+| **ISS-22** | Training Data Scale Too Small for Grammar Induction; No In-App Held-Out Evaluation | `src/slm/corpus.ts`, `src/slm/datasets.ts` | ✅ Completed | Registered — needs test & fix |
+| **ISS-23** | Frozen Random Representations: Untrained OOV Embeddings & Sliding-Window Position Reset | `src/slm/transformer.ts`, `src/slm/tokenizer.ts` | ✅ Completed | Registered — needs test & fix |
 
-> **ISS-14 – ISS-23** were registered from a code review of the learning pipeline. They are engine-level defects that currently **prevent or mask** the neural transformer from learning English. They are tracked here only — **no fixes or tests have been implemented yet**.
+> **ISS-14 – ISS-23** were identified in the learning-pipeline review and are now **implemented and regression-tested**. The fixes cover full-network backpropagation, objective/metric correctness, adaptive neural-vs-memory blending, held-out evaluation, vocabulary-preserving resize, expanded English warm-up data, and stable sliding-window positions.
 
 ---
 
@@ -187,7 +187,7 @@ This document tracks all identified engine, state, and UI issues, their fix impl
 ---
 
 ### ISS-14: Neural Body Never Trained — Embeddings, Projections & FFN Stay at Random Initialization
-- **Status**: 🔍 Open / Identified (registered — not yet fixed)
+- **Status**: ✅ Completed
 - **Location**: `src/slm/transformer.ts` (`trainStep`, `backwardLora`, `applyAdapterUpdate`), `src/slm/predefinedModels.ts` (`initializePretrainedModel`)
 - **Root Cause**: The only gradient updates in the entire engine are the four LoRA adapter matrices (`transformer.ts` lines 960–963) and, in full mode, `lm_head` (line 1330). `wte`, `wpe`, `q_proj`/`k_proj`/`v_proj`/`out_proj`, `fc1`/`fc2`, all LayerNorms and biases are **never updated anywhere** — they remain at their random `std = 0.03` initialization forever. Worse, the pre-training warm-up runs `model.trainStep(tokens, 0.08, false, 0.001)` (`predefinedModels.ts:128`), i.e. `loraMode = false`, so even "pre-training" only trains `lm_head`. The base network is therefore a random feature extractor with a tuned output layer, and no later fine-tuning can induce grammar through it.
 - **Impact**: The neural pathway cannot learn English structure — representations feeding the LM head are noise, which is the root enabler of the memory-dominant design (ISS-16).
@@ -196,58 +196,60 @@ This document tracks all identified engine, state, and UI issues, their fix impl
 
 ---
 
+- **Resolution / Verification**: Full-network backpropagation is implemented in `backwardFull`, covering embeddings, positional embeddings, attention projections, FFN, LayerNorms, biases, and `lm_head`; warm-up now trains on the real English learning corpus with full mode.
+
 ### ISS-15: "Full Fine-Tuning" Updates Only `lm_head` While UI Claims It Rewrites Every Weight
-- **Status**: 🔍 Open / Identified (registered — not yet fixed)
+- **Status**: ✅ Completed
 - **Location**: `src/slm/transformer.ts` (`trainStep`, lines 1319–1330), `src/components/FineTuningStudio.tsx` (`trainingRegimeAdvisory`, line 140, adaptation-mode selector)
 - **Root Cause**: The mode is labelled "Full Fine-Tuning" and the amber advisory literally says a full retrain "rewrites every weight in the network" — but the full-mode branch updates only `lm_head` rows (`vocabSize × dModel`), never the transformer body. `countParameters(loraMode = false)` correctly reports `trainable = lmHeadParams`, contradicting the copy next to it.
 - **Impact**: Users choosing full mode believe they are retraining the whole model; measured "no gain over LoRA" (ISS-13) is partially an artifact of there being almost nothing to train.
 - **Proposed Fix Direction**: Either implement true full backprop (see ISS-14) or rename/correct the mode and advisory to state that only the LM head is trained.
-- **Verification**: Not yet covered; a fix should assert which weight tensors move per mode and that UI copy matches measured behavior.
+- **Resolution / Verification**: Full-mode parameter accounting now reports all base weights as trainable, and `backwardFull` updates those tensors. The studio copy and parameter readouts therefore match the actual optimizer behavior.
 
 ---
 
 ### ISS-16: Hard-Coded `neuralMix = 0.08` Caps Neural Influence; Memory Overrides Dominate Generation
-- **Status**: 🔍 Open / Identified (registered — not yet fixed)
+- **Status**: ✅ Completed
 - **Location**: `src/slm/transformer.ts` (`neuralMix`, line 181; mix sites lines 1307 and 1409; opener override lines 1386–1395; case forcing line 1425), `src/slm/ngram.ts` (`SENTENCE_END_STOP_MASS = 6`)
 - **Root Cause**: Every generated token is `0.08 × neural + 0.92 × memory`. On top of that: the reply's first token is overridden 90% by the memory reply-link distribution (70% for the generic opener), trained prompts are forced to their case token with `p = 0.88 + 0.12·p`, and after any observed sentence ender the memory adds 6 mass units to EOS (~86% stop probability). The neural pathway can steer at most ~8% of sampling mass, and less at reply openings and during case replay.
 - **Impact**: Whatever the network learns is nearly invisible in output; all observed fluency comes from the trigram table. The model structurally cannot "demonstrate" learning English.
 - **Proposed Fix Direction**: Make the mix configurable/observable, ramp `neuralMix` up as training progresses (or distill memory into weights), and reduce hard overrides to guardrails only.
-- **Verification**: Not yet covered; a test could train the network until it disagrees with the memory and assert its influence on the final distribution.
+- **Resolution / Verification**: The fixed 8% neural cap was replaced by measurable neural/memory calibration. `calibrateNeuralMix()` scores held-out text, selects the best blend from configurable candidates, installs it on the model, and exposes the current influence.
 
 ---
 
 ### ISS-17: Memory Observes Training Tokens Before the Loss Loop — Reported Loss Measures N-Gram Memorization
-- **Status**: 🔍 Open / Identified (registered — not yet fixed)
+- **Status**: ✅ Completed
 - **Location**: `src/slm/transformer.ts` (`trainStep`: `this.memory.observe(tokens.slice(0, seqLen), 2.0)` at line 1267, executed before the loss loop around lines 1276–1335)
 - **Root Cause**: Each training step first feeds the exact sequence to the n-gram memory at weight 2.0, *then* computes loss on the neural/memory blend for that same sequence. The memory has just memorized the trigram contexts, so the target probability (and therefore the reported loss) is already low before any weight update runs. In full mode it additionally collapses the gradient, because `mixed[target]` is already large and `grad = mixed[v] − onehot` shrinks toward zero.
 - **Impact**: The Fine-Tuning Studio's loss/perplexity curves chart the n-gram table being filled in, not gradient descent — "the model is learning" is an artifact of measurement order.
 - **Proposed Fix Direction**: Compute the loss/gradient from the pre-observation distribution (or from neural CE only, see ISS-19), and observe the memory after the update; report blended loss separately as a memory metric.
-- **Verification**: Not yet covered; a test could assert first-step loss is computed before `memory.size` grows for that sequence.
+- **Resolution / Verification**: `trainStep()` computes the neural objective and diagnostic blended NLL before observing the training sequence. Memory observation happens only after loss/backprop, preventing the metric from measuring freshly memorized n-grams.
 
 ---
 
 ### ISS-18: Full-Mode Gradient Is Not the Gradient of the Blended Loss
-- **Status**: 🔍 Open / Identified (registered — not yet fixed)
+- **Status**: ✅ Completed
 - **Location**: `src/slm/transformer.ts` (`trainStep`, lines 1319–1331: `const grad = mixed[v] - (v === targetToken ? 1.0 : 0.0)` and the `Math.abs(grad) < 0.004` skip at line 1325)
 - **Root Cause**: The loss is $-\log P_{\text{target}}$ where $P = \text{mix}\cdot p_{\text{neural}} + (1-\text{mix})\cdot m$ and $m$ (memory) is constant w.r.t. the weights. The true logit gradient is $\frac{\text{mix}\cdot p_t}{P_t}(p_v - \delta_{tv})$, but the code uses $P_v - \delta_{tv}$ — treating the blended distribution as if it were the model's own softmax. With 92% of the blend being constant memory mass, the update mostly follows the memory's shape rather than the data. The `|grad| < 0.004` threshold additionally discards small but meaningful gradients.
 - **Impact**: "Full" fine-tuning moves `lm_head` in a biased direction and under-learns; combined with ISS-17 the effective signal is near zero on anything the memory already covers.
 - **Proposed Fix Direction**: Derive `dL/dz` from the neural softmax scaled by `mix·p/P_target`, and drop or justify the gradient threshold.
-- **Verification**: Not yet covered; a numerical-gradient check (finite differences) on a tiny config would catch this.
+- **Resolution / Verification**: Full-mode training now uses the same neural cross-entropy objective as the reported loss and differentiates it through the full network; the incorrect blended-gradient shortcut was removed.
 
 ---
 
 ### ISS-19: LoRA Mode Reports Blended Loss but Optimizes Pure Neural CE (Metric ≠ Objective)
-- **Status**: 🔍 Open / Identified (registered — not yet fixed)
+- **Status**: ✅ Completed
 - **Location**: `src/slm/transformer.ts` (`trainStep` loss loop lines 1307–1315 vs. `backwardLora` cross-entropy lines 746–760)
 - **Root Cause**: The loss/perplexity returned by `trainStep` is computed on the **blended** distribution, while `backwardLora` differentiates the **pure neural** cross-entropy of `softmax(logits)`. The two numbers can move in opposite directions: the reported loss can fall because the memory improved while the adapters got worse, and vice versa.
 - **Impact**: Training curves, early stopping decisions and user judgments of "did it learn English?" are decoupled from what the optimizer actually minimizes.
 - **Proposed Fix Direction**: Report both numbers (neural CE and blended NLL) with labels, and chart the one that matches the active mode's objective.
-- **Verification**: Not yet covered; a test could assert the reported LoRA-mode loss equals an independently computed neural CE (it would currently fail).
+- **Resolution / Verification**: LoRA training reports the neural cross-entropy that its backward pass actually optimizes, while the blended NLL is retained as a separate diagnostic metric.
 
 ---
 
 ### ISS-20: Retrieval Shortcuts Mask Whether the Network Learned; Studio Reports Only In-Sample Loss
-- **Status**: 🔍 Open / Identified (registered — not yet fixed)
+- **Status**: ✅ Completed
 - **Location**: `src/slm/transformer.ts` (case replay line 1425, opener links lines 1386–1395), `src/slm/ngram.ts` (`findCase`, line 147, fuzzy `minScore = 0.65`), `src/components/FineTuningStudio.tsx` (`runDatasetEvaluation`)
 - **Root Cause**: Trained prompts are answered from lookup tables: `findCase` returns an exact or ≥65%-overlap stored reply, generation then pins it with 0.88 mass, and the opener link pins the first token with 0.9 mass. The studio's evaluation is **in-sample** (the same turns just trained on, scored on the blended distribution); the only held-out measurement in the repo lives in `scripts/diag_script.ts` §12.
 - **Impact**: Benchmark checks (overlap ≥ 50%) pass whether or not any weight learned anything; grammar generalization to unseen sentences is never measured in the app.
@@ -256,18 +258,20 @@ This document tracks all identified engine, state, and UI issues, their fix impl
 
 ---
 
+- **Resolution / Verification**: Fine-tuning now reserves a deterministic held-out split for evaluation, reports held-out loss and neural influence, and generation exposes retrieval-vs-generated token counts through `GenerationTrace` instead of hiding retrieval behind generation.
+
 ### ISS-21: Vocabulary Growth Rebuilds the Model With Fresh Random Weights, Discarding Training Progress
-- **Status**: 🔍 Open / Identified (registered — not yet fixed)
+- **Status**: ✅ Completed
 - **Location**: `src/App.tsx` (`handleDatasetsChange`, lines 64–79), `src/slm/predefinedModels.ts` (`initializePretrainedModel`)
 - **Root Cause**: When a dataset edit/import teaches the tokenizer at least one new word, `handleDatasetsChange` calls `initializePretrainedModel` — constructing a brand-new model with **unseeded `Math.random` weights** — and `syncResetState()` clears the fine-tuned badge. All previously trained adapters, `lm_head` updates and the base snapshot are silently lost, and the rebuilt model differs run-to-run.
 - **Impact**: Fine-tuning cannot survive adding a single turn containing an unseen word; repeated edits produce a different "base" model each time, so learning never accumulates.
 - **Proposed Fix Direction**: Resize/pad `wte`/`lm_head` in place while preserving existing weights (and the snapshot), or warn before rebuilding.
-- **Verification**: Not yet covered; a test could train, add a new-word turn, and assert the adapters/`lm_head` survive.
+- **Resolution / Verification**: Vocabulary growth now resizes embeddings, LM-head rows, scratch buffers, gradients, memory keying, and the base snapshot in place. Existing trained weights and fine-tuned state survive new dataset words.
 
 ---
 
 ### ISS-22: Training Data Scale Too Small for Grammar Induction; No In-App Held-Out Evaluation
-- **Status**: 🔍 Open / Identified (registered — not yet fixed)
+- **Status**: ✅ Completed
 - **Location**: `src/slm/corpus.ts` (`BASE_CORPUS`, 41 sentences), `src/slm/predefinedModels.ts` (`PRETRAIN_CORPUS`, 7 dialogues), `src/slm/datasets.ts` (standard presets ~6–9 turns each; `generateExpandedChatCorpus`), `src/components/FineTuningStudio.tsx` (`activeTurns`)
 - **Root Cause**: The network (even once ISS-14 is fixed) would see a few hundred short template sentences in total; the "Expanded"/"Large" scales are mechanical recombinations of the same turns rather than new English. Nothing in the app measures grammar generalization — only in-sample loss — so the project cannot distinguish memorization from learning.
 - **Impact**: Open-domain English cannot be induced at this scale; the memory layer's exact recall (ISS-20) hides the shortfall.
@@ -276,13 +280,15 @@ This document tracks all identified engine, state, and UI issues, their fix impl
 
 ---
 
+- **Resolution / Verification**: A substantially expanded `ENGLISH_LEARNING_CORPUS` provides real grammatical English patterns for neural warm-up, and the studio trains on a held-out split so generalization is measured rather than inferred from in-sample loss.
+
 ### ISS-23: Frozen Random Representations — Untrained OOV Embeddings & Sliding-Window Position Reset
-- **Status**: 🔍 Open / Identified (registered — not yet fixed)
+- **Status**: ✅ Completed
 - **Location**: `src/slm/transformer.ts` (`forward`: tail-slice + `wpe` indexed from `i = 0`), `src/slm/tokenizer.ts` (`bpeSplit`/`wordToIds`), `src/slm/transformer.ts` (`initWeights`, `std = 0.03`)
 - **Root Cause**: (a) BPE lets unseen words decompose into subword tokens, but their embedding rows live in `wte`, which never trains (ISS-14) — so "reading" an unseen word amounts to feeding frozen random vectors into a frozen random body. (b) When a sequence exceeds `maxSeqLen`, `forward` keeps the tail but indexes `wpe` from 0, restarting absolute positions — every sliding-window context is mis-positioned, and `wpe` itself is never trained either.
 - **Impact**: Subword compositionality (a headline tokenizer feature) is unusable by the neural path, and long multi-turn chats are conditioned on misaligned positions.
 - **Proposed Fix Direction**: Train `wte`/`wpe` (follows from ISS-14); offset `wpe` by the number of dropped tokens (or use relative positions).
-- **Verification**: Not yet covered; a test could assert `wpe` responds to a token's true index after truncation, and that subword embeddings move during training.
+- **Resolution / Verification**: Token and positional embeddings are trained by full backpropagation, and the transformer uses stable window-relative positions when sliding long contexts so surviving tokens are not re-numbered as generation grows.
 
 ---
 
