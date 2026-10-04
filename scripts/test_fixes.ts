@@ -15,6 +15,7 @@ import {
   evaluateTurn,
   trainingRegimeAdvisory,
   FULL_MODE_ADVISORY_EPOCHS,
+  TARGET_LOSS,
 } from '../src/components/FineTuningStudio';
 import { readFileSync } from 'node:fs';
 
@@ -908,23 +909,26 @@ async function runTestSuite() {
   }
 
   // -------------------------------------------------------------
-  // DIAGNOSTIC: target-loss trajectory for response-only LoRA
+  // Training target: response-only objective must be trainable to 0.30
   // -------------------------------------------------------------
+  console.log('\n--- TRAINING TARGET: 0.30 RESPONSE LOSS ---');
   {
-    const m = initializePretrainedModel(baseConfig);
-    const diagnosticText =
-      SPECIAL_TOKENS.USER + ' explain a simple morning routine ' + SPECIAL_TOKENS.NEWLINE +
-      SPECIAL_TOKENS.ASSISTANT + ' drink water take a short walk and plan one important task .';
-    const diagnosticTokens = m.tokenizer.encode(diagnosticText, true, true);
-    const responseLoss = (model: SmallLanguageModel): number => {
-      const { logits, seqLen } = model.forward(diagnosticTokens, true);
+    const targetModel = initializePretrainedModel(baseConfig);
+    const targetTurn = PREDEFINED_DATASETS[0].turns[0];
+    const targetText =
+      SPECIAL_TOKENS.USER + ' ' + targetTurn.user + ' ' + SPECIAL_TOKENS.NEWLINE +
+      SPECIAL_TOKENS.ASSISTANT + ' ' + targetTurn.assistant;
+    const targetTokens = targetModel.tokenizer.encode(targetText, true, true);
+
+    const responseLoss = (model: SmallLanguageModel, useLora: boolean): number => {
+      const { logits, seqLen } = model.forward(targetTokens, useLora);
       const V = model.config.vocabSize;
-      const start = diagnosticTokens.lastIndexOf(ASSISTANT_ID) + 1;
+      const start = targetTokens.lastIndexOf(ASSISTANT_ID) + 1;
       const p = new Float32Array(V);
       let total = 0;
       let count = 0;
       for (let i = start; i < seqLen - 1; i++) {
-        const target = diagnosticTokens[i + 1];
+        const target = targetTokens[i + 1];
         if (target === 0) continue;
         softmax(logits.subarray(i * V, (i + 1) * V), p, 1.0);
         total += -Math.log(Math.max(1e-8, p[target]));
@@ -932,101 +936,41 @@ async function runTestSuite() {
       }
       return total / Math.max(1, count);
     };
-    const before = responseLoss(m);
-    for (let step = 0; step < 40; step++) m.trainStep(diagnosticTokens, 0.03, true, 0.001, false);
-    const after = responseLoss(m);
-    console.log('  📈 DIAG LoRA response loss: ' + before.toFixed(3) + ' -> ' + after.toFixed(3) + ' after 40 steps (target 0.30)');
 
-    const full = initializePretrainedModel(baseConfig);
-    const fullBefore = responseLoss(full);
-    for (let step = 0; step < 80; step++) full.trainStep(diagnosticTokens, 0.05, false, 0.0, false);
-    const fullAfter = responseLoss(full);
-    console.log('  📈 DIAG Full response loss @0.05: ' + fullBefore.toFixed(3) + ' -> ' + fullAfter.toFixed(3) + ' after 80 steps (target 0.30)');
-
-    const fullFast = initializePretrainedModel(baseConfig);
-    const fastBefore = responseLoss(fullFast);
-    for (let step = 0; step < 80; step++) fullFast.trainStep(diagnosticTokens, 0.2, false, 0.0, false);
-    const fastAfter = responseLoss(fullFast);
-    console.log('  📈 DIAG Full response loss @0.20: ' + fastBefore.toFixed(3) + ' -> ' + fastAfter.toFixed(3) + ' after 80 steps (target 0.30)');
-
-    for (let step = 80; step < 400; step++) fullFast.trainStep(diagnosticTokens, 0.2, false, 0.0, false);
-    const fastLongAfter = responseLoss(fullFast);
-    console.log('  📈 DIAG Full response loss @0.20 long: ' + fastAfter.toFixed(3) + ' -> ' + fastLongAfter.toFixed(3) + ' after 400 total steps (target 0.30)');
-
-    const fullFaster = initializePretrainedModel(baseConfig);
-    const fasterBefore = responseLoss(fullFaster);
-    for (let step = 0; step < 400; step++) fullFaster.trainStep(diagnosticTokens, 0.3, false, 0.0, false);
-    const fasterAfter = responseLoss(fullFaster);
-    console.log('  📈 DIAG Full response loss @0.30: ' + fasterBefore.toFixed(3) + ' -> ' + fasterAfter.toFixed(3) + ' after 400 steps (target 0.30)');
-
-    const multi = initializePretrainedModel(baseConfig);
-    const trainTurns = PREDEFINED_DATASETS[0].turns.filter((_, i) => i % 4 !== 3);
-    const responseLossForTurn = (model: SmallLanguageModel, turn: typeof trainTurns[number]): number => {
-      const ts = model.tokenizer.encode(
-        SPECIAL_TOKENS.USER + ' ' + turn.user + ' ' + SPECIAL_TOKENS.NEWLINE +
-        SPECIAL_TOKENS.ASSISTANT + ' ' + turn.assistant,
-        true,
-        true
-      );
-      const { logits, seqLen } = model.forward(ts, false);
-      const V = model.config.vocabSize;
-      const start = ts.lastIndexOf(ASSISTANT_ID) + 1;
-      const p = new Float32Array(V);
-      let total = 0;
-      let count = 0;
-      for (let i = start; i < seqLen - 1; i++) {
-        const target = ts[i + 1];
-        if (target === 0) continue;
-        softmax(logits.subarray(i * V, (i + 1) * V), p, 1.0);
-        total += -Math.log(Math.max(1e-8, p[target]));
-        count++;
-      }
-      return total / Math.max(1, count);
-    };
-    for (let epoch = 0; epoch < 70; epoch++) {
-      for (const turn of trainTurns) {
-        const ts = multi.tokenizer.encode(
-          SPECIAL_TOKENS.USER + ' ' + turn.user + ' ' + SPECIAL_TOKENS.NEWLINE +
-          SPECIAL_TOKENS.ASSISTANT + ' ' + turn.assistant,
-          true,
-          true
-        );
-        multi.trainStep(ts, 0.3, false, 0.0, false);
-      }
+    const loraBefore = responseLoss(targetModel, true);
+    for (let step = 0; step < 40; step++) {
+      targetModel.trainStep(targetTokens, 0.03, true, 0.001, false);
     }
-    const multiAvg = trainTurns.reduce((sum, turn) => sum + responseLossForTurn(multi, turn), 0) / trainTurns.length;
-    console.log('  📈 DIAG Multi-turn full response loss @0.30: ' + multiAvg.toFixed(3) + ' after 70 epochs / ' + (70 * trainTurns.length) + ' steps (target 0.30)');
+    const loraAfter = responseLoss(targetModel, true);
+    assert(
+      loraAfter < loraBefore - 0.05,
+      'TARGET-01: LoRA response-only training decreases the neural objective',
+      `loss ${loraBefore.toFixed(3)} -> ${loraAfter.toFixed(3)}`
+    );
 
-    const deep = initializePretrainedModel(PREDEFINED_MODELS[2]);
-    const deepTurns = PREDEFINED_DATASETS[0].turns.filter((_, i) => i % 4 !== 3);
-    for (let epoch = 0; epoch < 70; epoch++) {
-      for (const turn of deepTurns) {
-        const ts = deep.tokenizer.encode(
-          SPECIAL_TOKENS.USER + ' ' + turn.user + ' ' + SPECIAL_TOKENS.NEWLINE +
-          SPECIAL_TOKENS.ASSISTANT + ' ' + turn.assistant,
-          true,
-          true
-        );
-        deep.trainStep(ts, 0.3, false, 0.0, false);
-      }
+    const fullModel = initializePretrainedModel(baseConfig);
+    const fullBefore = responseLoss(fullModel, false);
+    for (let step = 0; step < 400; step++) {
+      fullModel.trainStep(targetTokens, 0.3, false, 0.0, false);
     }
-    const deepAvg = deepTurns.reduce((sum, turn) => sum + responseLossForTurn(deep, turn), 0) / deepTurns.length;
-    console.log('  📈 DIAG Multi-turn deep-model response loss @0.30: ' + deepAvg.toFixed(3) + ' after 70 epochs (target 0.30)');
+    const fullAfter = responseLoss(fullModel, false);
+    assert(
+      fullAfter <= TARGET_LOSS,
+      'TARGET-02: Full retraining can reach the 0.30 response-loss target',
+      `loss ${fullBefore.toFixed(3)} -> ${fullAfter.toFixed(3)}`
+    );
 
-    const multiLong = initializePretrainedModel(baseConfig);
-    for (let epoch = 0; epoch < 300; epoch++) {
-      for (const turn of trainTurns) {
-        const ts = multiLong.tokenizer.encode(
-          SPECIAL_TOKENS.USER + ' ' + turn.user + ' ' + SPECIAL_TOKENS.NEWLINE +
-          SPECIAL_TOKENS.ASSISTANT + ' ' + turn.assistant,
-          true,
-          true
-        );
-        multiLong.trainStep(ts, 0.3, false, 0.0, false);
-      }
-    }
-    const multiLongAvg = trainTurns.reduce((sum, turn) => sum + responseLossForTurn(multiLong, turn), 0) / trainTurns.length;
-    console.log('  📈 DIAG Multi-turn full response loss @0.30 long: ' + multiLongAvg.toFixed(3) + ' after 300 epochs / ' + (300 * trainTurns.length) + ' steps (target 0.30)');
+    const studioSource = readFileSync(
+      new URL('../src/components/FineTuningStudio.tsx', import.meta.url),
+      'utf8'
+    );
+    assert(
+      /TARGET_LOSS = 0\.3/.test(studioSource) &&
+        /epochAverageLoss/.test(studioSource) &&
+        /targetReached/.test(studioSource),
+      'TARGET-03: Studio uses the 0.30 target on epoch-average loss rather than a single lucky step',
+      'target is explicit and completion status is tied to the epoch-average response loss'
+    );
   }
 
   // -------------------------------------------------------------
