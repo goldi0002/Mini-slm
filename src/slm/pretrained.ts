@@ -9,7 +9,7 @@ import { pipeline } from '@huggingface/transformers';
 import type { GenerationOptions, GeneratedTokenInfo } from '../types';
 import { defaultTokenizer } from './tokenizer';
 
-export const PRETRAINED_MODEL_ID = 'HuggingFaceTB/SmolLM2-360M-Instruct';
+export const PRETRAINED_MODEL_ID = 'onnx-community/SmolLM2-360M-Instruct-ONNX';
 
 type Generator = (messages: Array<{ role: string; content: string }>, options?: Record<string, unknown>) => Promise<unknown>;
 
@@ -32,7 +32,7 @@ async function getGenerator(): Promise<Generator> {
 
 function parseConversation(prompt: string): Array<{ role: string; content: string }> {
   const turns: Array<{ role: string; content: string }> = [];
-  const re = /<user>\\s*([\\s\\S]*?)(?=\\s*<assistant>|$)|<assistant>\\s*([\\s\\S]*?)(?=\\s*<user>|$)/gi;
+  const re = /<user>\s*([\s\S]*?)(?=\s*<assistant>|$)|<assistant>\s*([\s\S]*?)(?=\s*<user>|$)/gi;
   let match: RegExpExecArray | null;
   while ((match = re.exec(prompt))) {
     if (match[1] !== undefined) {
@@ -68,7 +68,7 @@ function generatedText(output: unknown): string {
 
 function cleanReply(text: string): string {
   return text
-    .replace(/^<assistant>\\s*/i, '')
+    .replace(/^<assistant>\s*/i, '')
     .split(/<user>|<assistant>/i)[0]
     .trim();
 }
