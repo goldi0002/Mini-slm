@@ -426,6 +426,7 @@ export const FineTuningStudio: React.FC<FineTuningStudioProps> = ({
       lossHistory: [],
       currentLoss: 0,
       currentPerplexity: 0,
+      currentBlendedLoss: 0,
       sampleOutputs: [],
     });
     setEvalState({ isEvaluating: false, summary: null });
