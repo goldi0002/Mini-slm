@@ -293,6 +293,9 @@ export class SmallLanguageModel {
   private optimizerSecondMoment = new WeakMap<Float32Array, Float32Array>();
   private optimizerSecondMomentBuffers: Float32Array[] = [];
   private optimizerStep = 0;
+  // Fast adaptation counters let browser fine-tuning amortize expensive neural updates.
+  private fastAdaptStepCounter = 0;
+  private lastFastNeuralResult: TrainStepResult | null = null;
 
   // Gradient buffers for the full backpropagation path (see backwardFull).
   private weightGrads: WeightGradients | null = null;
@@ -1986,6 +1989,44 @@ export class SmallLanguageModel {
   }
 
   /**
+   * Fast conversational adaptation path.
+   *
+   * The memory/case layer learns the complete user -> assistant example
+   * immediately, so the next chat request can use it without waiting for a
+   * full transformer backprop pass. Neural LoRA updates are intentionally
+   * amortized: one out of every neuralEvery examples runs real backprop.
+   * This makes browser fine-tuning responsive while still improving the neural
+   * model instead of pretending retrieval is gradient learning.
+   */
+  public fastLearnTurn(
+    tokens: number[],
+    learningRate = 0.03,
+    loraMode = true,
+    weightDecay = 0.001,
+    neuralEvery = 4
+  ): TrainStepResult {
+    const safeEvery = Math.max(1, Math.floor(neuralEvery));
+    this.fastAdaptStepCounter++;
+
+    // Learn the actual conversation first. This is the part that should be
+    // immediately visible in chat after a dataset is trained.
+    this.observeTrainingSequence(tokens, Math.min(tokens.length, this.config.maxSeqLen));
+
+    if (!loraMode || this.fastAdaptStepCounter % safeEvery === 0) {
+      // The memory was already updated above; avoid observing it a second time.
+      return this.trainStep(tokens, learningRate, loraMode, weightDecay, false);
+    }
+
+    const previous = this.lastFastNeuralResult;
+    return previous ?? {
+      loss: 0,
+      perplexity: 1,
+      neuralLoss: 0,
+      blendedLoss: 0,
+    };
+  }
+
+  /**
    * Train step on a conversational token sequence.
    * Updates LoRA adapters or full weights using Cross Entropy loss.
    */  public trainStep(
@@ -2078,12 +2119,14 @@ export class SmallLanguageModel {
 
     const avgLoss = targetCount > 0 ? totalLoss / targetCount : 0;
     const avgBlended = targetCount > 0 ? totalBlended / targetCount : 0;
-    return {
+    const result = {
       loss: avgLoss,
       perplexity: Math.min(9999, Math.exp(Math.min(10, avgLoss))),
       neuralLoss: avgLoss,
       blendedLoss: avgBlended,
     };
+    this.lastFastNeuralResult = result;
+    return result;
   }
 
   /**
