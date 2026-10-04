@@ -146,7 +146,7 @@ export function evaluateTurn(
  */
 export const FULL_MODE_ADVISORY_EPOCHS = 25;
 export const FULL_RETRAIN_TARGET_LR = 0.3;
-export const DEFAULT_TRAINING_EPOCHS = 70;
+export const DEFAULT_TRAINING_EPOCHS = 18;
 
 /**
  * Advisory for a hyperparameter set that is expected to cost the user more
@@ -186,10 +186,10 @@ export const FineTuningStudio: React.FC<FineTuningStudioProps> = ({
   const [datasetScale, setDatasetScale] = useState<'standard' | 'expanded' | 'large'>('standard');
   const [hyperparams, setHyperparams] = useState<TrainingHyperparams>({
     epochs: DEFAULT_TRAINING_EPOCHS,
-    learningRate: FULL_RETRAIN_TARGET_LR,
-    batchSize: 1,
-    weightDecay: 0.0,
-    loraMode: false,
+    learningRate: 0.03,
+    batchSize: 4,
+    weightDecay: 0.001,
+    loraMode: true,
     loraRank: model.config.loraRank,
   });
 
@@ -324,11 +324,12 @@ export const FineTuningStudio: React.FC<FineTuningStudioProps> = ({
         const currentLr =
           hyperparams.learningRate * (1.0 - (epoch - 1) / Math.max(1, totalEpochs * 1.2));
 
-        const { loss, perplexity, neuralLoss, blendedLoss } = model.trainStep(
+        const { loss, perplexity, neuralLoss, blendedLoss } = model.fastLearnTurn(
           tokens,
           currentLr,
           hyperparams.loraMode,
-          hyperparams.weightDecay
+          hyperparams.weightDecay,
+          hyperparams.batchSize
         );
 
         // Record the number the optimizer actually moves, plus the blend-epoch
