@@ -958,6 +958,45 @@ async function runTestSuite() {
     for (let step = 0; step < 400; step++) fullFaster.trainStep(diagnosticTokens, 0.3, false, 0.0, false);
     const fasterAfter = responseLoss(fullFaster);
     console.log('  📈 DIAG Full response loss @0.30: ' + fasterBefore.toFixed(3) + ' -> ' + fasterAfter.toFixed(3) + ' after 400 steps (target 0.30)');
+
+    const multi = initializePretrainedModel(baseConfig);
+    const trainTurns = PREDEFINED_DATASETS[0].turns.filter((_, i) => i % 4 !== 3);
+    const responseLossForTurn = (model: SmallLanguageModel, turn: typeof trainTurns[number]): number => {
+      const ts = model.tokenizer.encode(
+        SPECIAL_TOKENS.USER + ' ' + turn.user + ' ' + SPECIAL_TOKENS.NEWLINE +
+        SPECIAL_TOKENS.ASSISTANT + ' ' + turn.assistant,
+        true,
+        true
+      );
+      const { logits, seqLen } = model.forward(ts, false);
+      const V = model.config.vocabSize;
+      const start = ts.lastIndexOf(ASSISTANT_ID) + 1;
+      const p = new Float32Array(V);
+      let total = 0;
+      let count = 0;
+      for (let i = start; i < seqLen - 1; i++) {
+        const target = ts[i + 1];
+        if (target === 0) continue;
+        softmax(logits.subarray(i * V, (i + 1) * V), p, 1.0);
+        total += -Math.log(Math.max(1e-8, p[target]));
+        count++;
+      }
+      return total / Math.max(1, count);
+    };
+    for (let epoch = 0; epoch < 70; epoch++) {
+      for (const turn of trainTurns) {
+        const ts = multi.tokenizer.encode(
+          SPECIAL_TOKENS.USER + ' ' + turn.user + ' ' + SPECIAL_TOKENS.NEWLINE +
+          SPECIAL_TOKENS.ASSISTANT + ' ' + turn.assistant,
+          true,
+          true
+        );
+        multi.trainStep(ts, 0.3, false, 0.0, false);
+      }
+    }
+    const multiAvg = trainTurns.reduce((sum, turn) => sum + responseLossForTurn(multi, turn), 0) / trainTurns.length;
+    console.log('  📈 DIAG Multi-turn full response loss @0.30: ' + multiAvg.toFixed(3) + ' after 70 epochs / ' + (70 * trainTurns.length) + ' steps (target 0.30)');
+  }
   }
 
   // -------------------------------------------------------------
