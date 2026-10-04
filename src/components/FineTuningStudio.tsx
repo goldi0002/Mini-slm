@@ -291,6 +291,7 @@ export const FineTuningStudio: React.FC<FineTuningStudioProps> = ({
 
     const lossHistory: LossPoint[] = [];
     let stepCount = 0;
+    let targetReached = false;
 
     for (let epoch = 1; epoch <= totalEpochs; epoch++) {
       if (!isTrainingRef.current) break;
@@ -357,12 +358,17 @@ export const FineTuningStudio: React.FC<FineTuningStudioProps> = ({
         }
 
         // Keep browser UI interactive
+        if (neuralLoss <= TARGET_LOSS) {
+          targetReached = true;
+          break;
+        }
+
         if (stepCount % 2 === 0) {
           await new Promise((r) => setTimeout(r, 8));
         }
       }
 
-      if (!isTrainingRef.current) break;
+      if (!isTrainingRef.current || targetReached) break;
 
       // Generate a live sample completion at the end of each epoch, under the
       // same adaptation mode the epoch trained with.
@@ -391,7 +397,7 @@ export const FineTuningStudio: React.FC<FineTuningStudioProps> = ({
       }));
     }
 
-    const completedSuccessfully = isTrainingRef.current && stepCount === totalSteps;
+    const completedSuccessfully = isTrainingRef.current && (stepCount === totalSteps || targetReached);
     isTrainingRef.current = false;
     setTrainingState((prev) => ({
       ...prev,
@@ -842,6 +848,11 @@ export const FineTuningStudio: React.FC<FineTuningStudioProps> = ({
                     Step {trainingState.currentStep} / {trainingState.totalSteps}
                   </span>
                 </div>
+              )}
+              {!trainingState.isTraining && trainingState.currentLoss > 0 && trainingState.currentLoss <= TARGET_LOSS && (
+                <span className="rounded-full bg-emerald-50 border border-emerald-200 px-2 py-1 text-[10px] font-semibold text-emerald-700">
+                  Target {TARGET_LOSS.toFixed(2)} reached
+                </span>
               )}
             </div>
 
