@@ -1,1 +1,6 @@
-# Retired: local learning verification is no longer part of CI.\n
+name: Retired Learning Verification
+
+on:
+  workflow_dispatch:
+
+jobs: {}
