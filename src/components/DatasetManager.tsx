@@ -194,7 +194,7 @@ export const DatasetManager: React.FC<DatasetManagerProps> = ({
 
         <div className="w-full sm:w-auto">
           <button
-            onClick={onNavigateToTrain
+            onClick={onNavigateToTrain}
             className="w-full sm:w-auto bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-lg text-xs font-semibold shadow-2xs transition-colors cursor-pointer"
           >
             Train on This Dataset
