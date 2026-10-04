@@ -68,6 +68,8 @@ export interface TrainingState {
   lossHistory: LossPoint[];
   currentLoss: number;
   currentPerplexity: number;
+  /** Diagnostic NLL of the neural + memory blend; not the training objective. */
+  currentBlendedLoss: number;
   sampleOutputs: Array<{ epoch: number; prompt: string; response: string }>;
 }
 
