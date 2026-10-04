@@ -175,6 +175,7 @@ export const ChatPlayground: React.FC<ChatPlaygroundProps> = ({
       content: text,
       timestamp: Date.now(),
     };
+    const grounded = buildGroundedPrompt(text, chatHistory());
 
     if (comparisonMode) {
       // Side-by-side mode: generate for both Base and Fine-tuned
@@ -200,7 +201,6 @@ export const ChatPlayground: React.FC<ChatPlaygroundProps> = ({
         finetuned: [...prev.finetuned, ftMsg],
       }));
 
-      const grounded = buildGroundedPrompt(text, chatHistory());
       const prompt = grounded.prompt;
       const ftTokens: GeneratedTokenInfo[] = [];
 
@@ -274,9 +274,8 @@ export const ChatPlayground: React.FC<ChatPlaygroundProps> = ({
 
       setMessages((prev) => [...prev, assistantMsg]);
 
-      // Format prompt with conversational history; the engine drops turns the
-      // context window cannot hold, so a long chat never stalls generation.
-      const grounded = buildGroundedPrompt(text, chatHistory());
+      // Format prompt with conversational history and any retrieved local knowledge.
+      // The engine drops old turns when the context window cannot hold everything.
       const prompt = grounded.prompt;
 
       const collectedTokens: GeneratedTokenInfo[] = [];
